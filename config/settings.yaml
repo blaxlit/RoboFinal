@@ -41,3 +41,102 @@ grid_map:
   goal:
     x: 5
     y: 0
+
+# Used by src/target_detection.py and src/gimbal_shooter.py.
+# Every value is validated at start-up; a bad value stops the program with a
+# message naming the exact key. Missing keys fall back to safe defaults.
+target_shooting:
+  camera:
+    resolution: "720p"            # 360p | 540p | 720p
+    horizontal_fov_deg: 96.0      # used only while focal_length_px is null
+    focal_length_px: null         # press C with the target at calibration_distance_m, paste value here
+    calibration_distance_m: 1.0
+    swap_red_blue: false          # set true if red objects are detected as blue
+
+  detection:
+    process_width: 640            # candidate search width (refined at full resolution)
+    min_area_px: 80               # at process_width scale; lower = see farther, more noise
+    max_area_ratio: 0.6
+    min_solidity: 0.85            # rejects ragged / non-convex blobs
+    blur_kernel: 5                # odd numbers only
+    morph_kernel: 5               # odd numbers only
+    colors:                       # OpenCV HSV after lighting normalisation: H 0-179, S/V 0-255
+      # Tip: click a card in the shooter window to learn its colour for your room.
+      red:
+        - {lower: [0, 90, 45], upper: [9, 255, 255]}
+        - {lower: [160, 90, 45], upper: [179, 255, 255]}
+      yellow:
+        - {lower: [18, 90, 70], upper: [38, 255, 255]}
+      green:
+        - {lower: [39, 60, 35], upper: [88, 255, 255]}
+      blue:
+        - {lower: [89, 70, 35], upper: [135, 255, 255]}
+
+  lighting:                       # makes colours stable under dim / warm / cool light
+    white_balance: true           # remove yellow (warm) or blue (cool) light casts
+    max_wb_gain: 2.0
+    auto_brightness: true         # brighten dark rooms before reading colours
+    target_brightness: 120
+    max_brightness_gain: 3.0
+    wb_smoothing: 0.2
+    clahe: true                   # equalise brightness (dim rooms, shadows)
+    clahe_clip: 2.0
+
+  target:                         # only objects matching ALL of these are shot
+    color: "red"                  # a key from detection.colors
+    shape: "circle"               # circle | square | rectangle | triangle | any
+    size_m: 0.20                  # largest outer dimension (circle diameter / longest side)
+    min_distance_m: 0.3
+    max_distance_m: 3.0
+
+  tracking:
+    confirm_frames: 3             # consecutive frames before the target is trusted
+    lost_frames: 6                # frames kept after the target disappears
+    smoothing: 0.5                # 1.0 = no smoothing
+    max_jump_ratio: 2.0           # ignore blobs jumping more than N target sizes
+
+  aiming:
+    yaw_kp: 3.0                   # deg/s per deg of error
+    yaw_ki: 0.0
+    yaw_kd: 0.0
+    pitch_kp: 3.0
+    pitch_ki: 0.0
+    pitch_kd: 0.0
+    max_yaw_speed: 180.0          # deg/s
+    max_pitch_speed: 120.0
+    min_yaw_speed: 6.0            # overcome gimbal friction
+    min_pitch_speed: 8.0
+    hold_enter_ratio: 0.35        # anti-shake: stop at 0.35 x tolerance, restart only above tolerance
+    max_accel_dps2: 600.0         # anti-shake: smooth speed changes
+    target_smoothing: 0.35        # anti-shake: lower = steadier but slower to follow a moving target
+    refine_delay_s: 0.5           # after stopping, fix a small leftover error once the image is steady
+    reseed_deg: 4.0
+    camera_latency_s: 0.20        # Wi-Fi video delay; if the aim still overshoots, try 0.25-0.30
+    yaw_offset_deg: 0.0           # live trim keys: , .
+    pitch_offset_deg: 0.0         # live trim keys: [ ]
+    pitch_compensation:           # [distance_m, extra pitch up in degrees] - tune on the field
+      - [0.5, 5.0]
+      - [1.0, 3.0]
+      - [2.0, 2.0]
+      - [3.0, 2.2]
+    lock_tolerance_ratio: 0.4     # fraction of the target's angular radius
+    min_lock_tolerance_deg: 0.6
+    max_lock_tolerance_deg: 2.0
+    lock_frames: 3
+    max_lock_rate_dps: 8.0        # only fire once the aim has settled
+    pitch_limits_deg: [-20.0, 30.0]
+
+  firing:
+    auto_fire: false              # safety default; press F or use --auto-fire
+    cooldown_s: 0.6
+    max_shots_per_target: 3
+    fire_times: 1                 # water balls per shot
+
+  controls:
+    keyboard_backend: "auto"      # auto (pynput if allowed, else OpenCV window) | pynput | opencv
+    chassis_speed_mps: 0.5
+    chassis_rotate_dps: 90.0
+    gimbal_speed_dps: 60.0
+    command_rate_hz: 20.0
+    robot_mode: "free"            # free lets the chassis turn without dragging the gimbal
+    auto_track: true
