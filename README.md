@@ -94,3 +94,98 @@ python3 -m unittest discover -s tests -v
 Field tuning: 1) press `C` with the target 1 m away and copy the
 `focal_length_px` value into the config; 2) fire at 0.5 m, 1 m, 2 m and 3 m,
 then adjust `pitch_compensation` until the shots land on the target.
+
+## SLAM: explore an unknown area (Class Work 8)
+
+`src/slam_explore.py` explores an area with no map, builds the map from the
+ToF sensor on top of the gimbal, estimates the robot's own position, and
+reports where the robot started and ended. A live console in the browser shows
+everything while it runs.
+
+```bash
+python3 src/slam_explore.py --sim        # try it first with the built-in simulator
+python3 src/slam_explore.py              # real robot (Wi-Fi AP mode)
+python3 src/slam_explore.py --gt data/slam/ground_truth_example.json   # robot + ground truth for scoring
+```
+
+The console opens at <http://localhost:8765>. Press **Start mission**; the
+robot calibrates, then repeats *scan → localise → update map → pick frontier →
+drive* until nothing is left to explore. **STOP** (or Space) halts all motion,
+**Pause** freezes the mission, **Finish & report** ends it and writes the
+report. Use `--host 0.0.0.0` to open the console from a phone or another laptop
+on the same network.
+
+| Console part | What it does |
+| --- | --- |
+| Map | Live occupancy grid, trajectory, last scan, frontiers, planned path, ground truth. Zoom (wheel), pan (drag), rotate the view (buttons / slider, also rotates saved images), follow robot. |
+| Map modes | **Go to** (click a target) · **Set pose** (drag to fix the robot's pose) · **Border** (drag the area to explore and score) · **GT wall** / **GT arena** (draw the ground truth). |
+| Status | Map Accuracy and Coverage, SLAM pose vs odometry vs drift correction, start pose, pose in the arena frame, ToF, gimbal, mission stats, report (start / end), charts of ToF, coverage, accuracy, speed and drift correction over the whole run, polar plot of the last scan. |
+| Control | WASD/QE manual drive with speed sliders, rotate robot by ±45/90/180 or any angle, move, go to x/y, go home, scan now, auto calibrate, aim gimbal, ToF wall calibration, set / rotate the pose estimate, clear map, new session. |
+| Settings | Every setting (map size and resolution, border, scan range/speed/mode, noise filters, localisation, speeds, safety distances, exploration limits, scoring) with ranges and help. Changes apply at once; **Save settings** writes `config/slam_settings.yaml`. |
+| Ground truth | Load / draw / download the arena map and set where the robot starts in it. |
+| Results | The run folder's files and the latest map images. |
+
+### What gets saved (`data/slam/run_<date>_<time>/`)
+
+| File | Content |
+| --- | --- |
+| `map.png`, `map_with_ground_truth.png` | The map with trajectory, start (green) and end (red) |
+| `map_grid.csv`, `map_prob.npy`, `map_meta.json` | The grid itself (0 unknown, 1 free, 2 wall) |
+| `trajectory.csv`, `log_pose.csv` | Robot trajectory (SLAM pose and odometry at 10 Hz) |
+| `log_events.csv`, `log_scans_raw.csv`, `log_scans_filtered.csv` | Exploration log, every raw ToF reading, every filtered beam |
+| `comparison.png` | Ground-truth check: white/black correct, red missed wall, orange false wall, grey unexplored |
+| `report.md`, `report.json` | Start and end pose (map and arena frame), Map Accuracy, Coverage, calibration |
+
+**Map Accuracy** = correct cells / all arena cells × 100 and **Coverage** =
+explored cells / all arena cells × 100. Unknown cells never count as correct.
+`wall_tolerance_cells` (default 1) lets a wall found one cell off still count;
+the report also gives the strict score. Without a ground truth, set a
+**Border** to get Coverage.
+
+### Ground truth
+
+Measure the arena and write it as JSON in metres (see
+`data/slam/ground_truth_example.json`), or draw it in the console:
+
+```json
+{"name": "Lab maze", "border": [0, 0, 3.6, 3.0], "wall_thickness": 0.02,
+ "walls": [[0.6, 0.0, 0.6, 1.2], [1.2, 0.6, 2.4, 0.6]]}
+```
+
+Then enter the robot's start pose in that frame (Ground truth tab, or
+`gt_start_x`, `gt_start_y`, `gt_start_deg`).
+
+### How it works (for the presentation)
+
+1. **Sensing** – the gimbal turns the ToF sensor through 360° (sweep mode, or
+   stop-and-average step mode). Each reading is tagged with the gimbal angle at
+   the moment it was measured (latency-compensated).
+2. **Noise reduction** – range gate, per-angle median with MAD outlier
+   rejection, removal of spikes and dropouts that disagree with both
+   neighbours, readings that pass through a wall the map is already sure of are
+   dropped, then log-odds fusion averages many scans, and single-cell specks
+   are hidden.
+3. **Mapping** – a log-odds occupancy grid: cells along each beam become more
+   *free*, the cell where it ends more *occupied*; the wedge between
+   neighbouring beams is cleared too so no gaps are left.
+4. **Localisation** – wheel odometry + IMU heading give a first guess; each new
+   scan is then matched to the map (correlative search over a small window,
+   then Gauss-Newton refinement on a likelihood field) to remove the drift.
+5. **Exploration** – frontier-based: the boundary between known free space and
+   unknown space. The robot drives (Dijkstra path on a costmap that keeps it
+   away from walls) to the best frontier, scans again, and stops when no
+   reachable frontier is left. A forward-ToF emergency stop guards every move.
+6. **Auto calibration** – ToF noise (sets the filter), gyro drift, the sign of
+   the reported yaw and of turn commands (by scanning before and after a turn),
+   the ToF latency (sweeping both ways), and the odometry y sign. A known-distance
+   wall calibration corrects the ToF offset.
+
+The simulator (`--sim`) uses the ground-truth file as its world and adds ToF
+noise, outliers, dropouts, latency, odometry scale error and gyro drift, so the
+whole pipeline can be tested without the robot. Useful flags: `--time-scale 10`
+(faster simulation), `--auto --headless` (run a mission and exit),
+`--set scan_mode=step linear_speed_mps=0.2` (override settings).
+
+**On the real robot:** if the saved map comes out mirrored, flip
+`gimbal_yaw_sign` and run **Auto calibrate** again. Check `stop_distance_m`
+against your robot's bumper before the first run.

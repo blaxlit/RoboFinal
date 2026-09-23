@@ -1,3 +1,5 @@
 ﻿/.venv/
 
 /data/captures/
+
+/data/slam/run_*/

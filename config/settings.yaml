@@ -140,3 +140,14 @@ target_shooting:
     command_rate_hz: 20.0
     robot_mode: "free"            # free lets the chassis turn without dragging the gimbal
     auto_track: true
+
+# Used by src/slam_explore.py (Class Work 8: SLAM). Every SLAM setting, with
+# its range and help text, is listed in src/slam/params.py and in the console's
+# Settings tab. Put overrides here; the console's "Save settings" button writes
+# config/slam_settings.yaml, which wins over this section.
+slam:
+  scan_mode: "sweep"          # sweep (fast) | step (stop at each angle, more accurate)
+  scan_speed_dps: 45.0        # gimbal speed while sweeping
+  linear_speed_mps: 0.25
+  robot_radius_m: 0.20
+  resolution_m: 0.05
