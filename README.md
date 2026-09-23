@@ -103,9 +103,9 @@ reports where the robot started and ended. A live console in the browser shows
 everything while it runs.
 
 ```bash
-python3 src/slam_explore.py --sim        # try it first with the built-in simulator
-python3 src/slam_explore.py              # real robot (Wi-Fi AP mode)
-python3 src/slam_explore.py --gt data/slam/ground_truth_example.json   # robot + ground truth for scoring
+.venv/bin/python src/slam_explore.py --sim        # try it first with the built-in simulator
+.venv/bin/python src/slam_explore.py              # real robot (Wi-Fi AP mode)
+.venv/bin/python src/slam_explore.py --gt data/slam/ground_truth_example.json   # robot + ground truth for scoring
 ```
 
 The console opens at <http://localhost:8765>. Press **Start mission**; the
