@@ -8,6 +8,8 @@ the feedback loops for turning, driving, gimbal positioning and ToF scans.
 import math
 import threading
 
+import numpy as np
+
 
 class Abort(Exception):
     """Raised inside a motion when the operator presses Stop."""
@@ -217,6 +219,26 @@ class Driver:
         self.io.sleep(0.15)
         x, y, _ = self.odom_pose()
         return abs((x - x0) * lx + (y - y0) * ly)
+
+    def front_range(self, samples=5, timeout=1.0):
+        """Median of fresh forward ToF readings (lens to wall, metres), None if none.
+        Points the gimbal forward first."""
+        if abs(self.gimbal_deg()) > 3.0:
+            self.io.set_mode("free")
+            self.gimbal_goto(0.0, 0.0)
+        t0 = self.io.now()
+        end = t0 + timeout
+        got = []
+        while self.io.now() < end and len(got) < samples:
+            self.checkpoint()
+            got = [mm for _, mm in self.io.tof_since(t0 + self.p["tof_latency_s"])]
+            self.io.sleep(0.02)
+        vals = [mm / 1000.0 for mm in got if 0 < mm < 9990]
+        if not got:
+            return None
+        if not vals:  # nothing in range: wide open
+            return 10.0
+        return float(np.median(vals)) * self.p["tof_scale"] + self.p["tof_bias_m"]
 
     def manual(self, vx, vy_left, wz_ccw_dps):
         self.io.set_mode("chassis_lead")  # no re-centre here: it would block the dead-man loop

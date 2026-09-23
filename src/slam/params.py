@@ -115,7 +115,8 @@ PARAMS = {
     "grid_wall_thickness_m": (0.05, "float", 0.01, 0.3, 0.01, "Grid", "Wall thickness drawn in the grid map.", False),
     "grid_drive": (True, "bool", None, None, None, "Grid", "Move cell to cell along the grid (centred) once the grid is found.", False),
     "grid_stop_each_cell": (True, "bool", None, None, None, "Grid", "Stop and re-centre in every cell (off = drive straight runs).", False),
-    "grid_scan_each_cell": (False, "bool", None, None, None, "Grid", "Scan in every cell passed, not only at each target.", False),
+    "grid_cells_per_step": (1, "int", 1, 10, 1, "Grid", "Cells driven between scans (1 = move one cell, scan, repeat).", False),
+    "grid_scan_each_cell": (False, "bool", None, None, None, "Grid", "Also scan in cells passed during a multi-cell step.", False),
     "grid_center_tol_m": (0.03, "float", 0.005, 0.2, 0.005, "Grid", "Strafe back to the cell's centre line when further off than this.", False),
     "grid_align_view": (True, "bool", None, None, None, "Grid", "Rotate the view and saved images so the grid is straight.", False),
 

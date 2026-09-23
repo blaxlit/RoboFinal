@@ -145,12 +145,16 @@ The arena is treated as a maze whose walls lie on a square grid
   along part of an edge becomes the whole edge (gaps filled); blobs off the grid
   lines disappear. The Clean layer shows this map; Maze draws the voted walls
   (unknown edges dashed).
-- **Moving grid to grid** – once the grid is locked the robot drives cell centre
-  to cell centre along the grid axes: it turns to the axis, strafes back onto
-  the cell's centre line (mecanum wheels) and drives exactly to the next centre,
-  only through open edges. It targets the nearest cell that is unseen or still
-  has an unknown wall, scans there, and finishes when none is left. Before the
-  grid is locked it explores freely.
+- **Moving grid by grid, scanning grid by grid** – once the grid is known the
+  robot moves one cell at a time (`grid_cells_per_step: 1`) and scans in every
+  cell. Each step: turn to the grid axis, strafe back onto the cell's centre
+  line (mecanum wheels), point the ToF ahead and check the edge is really open
+  (if a wall is closer than the edge, it is marked as a wall and the robot does
+  not move), then drive exactly to the next cell centre and scan. Routes only
+  use open edges, toward the nearest cell that is unseen or still has an unknown
+  wall; the mission ends when none is left. With `grid_mode: fixed` this starts
+  after the first scan; in auto mode the robot explores freely until the grid
+  is confirmed.
 
 Rebuild a recorded run with the current settings (no robot needed), e.g. to try
 another cell size:

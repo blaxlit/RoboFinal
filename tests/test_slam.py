@@ -183,7 +183,7 @@ class GridModelTest(unittest.TestCase):
     def test_snap_pose_removes_small_heading_and_shift(self):
         from slam import gridmodel as G
         pts, ang = self.maze_points(theta_deg=0.0, offset=(0.0, 0.0))
-        m = G.GridModel(0.0, 0.63, 0.0, 0.0, 1.0, len(pts), True)
+        m = G.GridModel(0.0, 0.63, 0.0, 0.0, 1.0, len(pts), True, True)
         # the same walls seen from a pose that is 3 deg and 4 cm off
         th = math.radians(3)
         c, s = math.cos(th), math.sin(th)

@@ -585,7 +585,7 @@ class Explorer:
                 self.grid_model = self.grid_edges = self.snapped = None
             return
         prev = self.grid_model
-        if prev is not None and prev.cell_trusted and not log:
+        if prev is not None and prev.cell_trusted and prev.theta_locked and not log:
             model = prev  # locked: re-fitting to snapped points would let the grid drift with them
         else:
             pts = np.concatenate([a for a, _ in self.wall_pts[-80:]])
@@ -650,12 +650,15 @@ class Explorer:
             return "done"
         model = self.grid_model
         target = path[-1]
-        self.cell_tries[target] += 1
+        # one cell at a time (grid_cells_per_step), then scan again and re-plan
+        path = path[:1 + max(1, int(self.p["grid_cells_per_step"]))]
+        if path[-1] == target:
+            self.cell_tries[target] += 1
         centers = [gm.cell_center(model, c) for c in path]
         with self.lock:
             self.plan = {"frontiers": [], "goal": [round(v, 3) for v in centers[-1]],
                          "path": [[round(x, 3), round(y, 3)] for x, y in [self.pose()[:2]] + centers[1:]]}
-        self.log(f"Grid: cell {path[0]} -> {target}, {len(path) - 1} cell(s)")
+        self.log(f"Grid: cell {path[0]} -> {path[-1]}" + ("" if path[-1] == target else f" (heading for {target})"))
         self.state = "MOVING"
         self.grid_follow(path)
         return "moved"
@@ -689,6 +692,14 @@ class Explorer:
             if abs(off) > p["grid_center_tol_m"]:
                 self.detail = f"centring {off * 100:+.0f} cm"
                 self.driver.strafe(off)
+            # look before driving: the ToF must see past the edge into the next cell
+            front = self.driver.front_range()
+            need = model.cell / 2 - p["tof_offset_m"] - p["gimbal_offset_x_m"] + 0.12
+            if front is not None and front < need:
+                self.blocked_edges.add(frozenset((cur, cells[0])))
+                self.log(f"Wall ahead at {front:.2f} m between cells {cur} and {cells[0]} - not moving, "
+                         f"marking that edge as a wall", "warn")
+                return False
             ex, ey = gm.cell_center(model, cells[-1])
             x, y, _ = self.pose()
             dist = (ex - x) * math.cos(heading) + (ey - y) * math.sin(heading)

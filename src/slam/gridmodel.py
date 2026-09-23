@@ -51,7 +51,7 @@ class GridModel:
     def __init__(self, theta, cell, ou, ov, score, n_points, cell_trusted, theta_locked=False, margin=0.0):
         self.theta, self.cell, self.ou, self.ov = theta, cell, ou, ov
         self.score, self.n_points, self.cell_trusted = score, n_points, cell_trusted
-        self.theta_locked = theta_locked or cell_trusted
+        self.theta_locked = theta_locked
         self.margin = margin
 
     def to_grid(self, x, y):
@@ -171,7 +171,9 @@ def detect(pts, ang, params, previous=None, history=(), final=False):
     if final:
         trusted = fixed or (score > 0.3 and span > 1.5 * cell)
     else:
-        trusted = (fixed and span > 1.5 * cell and theta_locked) or (plausible and confirmed and theta_locked)
+        # fixed: the cell size is known, so the grid can be used at once; the angle
+        # keeps being refined (from unsnapped scans) until it is locked
+        trusted = (fixed and span > 0.8 * cell) or (plausible and confirmed and theta_locked)
     return GridModel(theta, cell, ou, ov, float(score), int(len(pts)), bool(trusted), theta_locked, margin)
 
 
