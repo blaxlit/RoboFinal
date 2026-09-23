@@ -17,11 +17,22 @@ import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VENV_PYTHON = os.path.join(BASE_DIR, ".venv", "bin", "python")
+
+try:
+    import cv2, numpy, yaml  # noqa: E401,F401
+except ImportError as exc:
+    # Started with a Python that lacks the packages (e.g. the system python3):
+    # rerun with the project's virtual environment if there is one.
+    if os.path.exists(VENV_PYTHON) and os.path.realpath(sys.prefix) != os.path.realpath(os.path.join(BASE_DIR, ".venv")):
+        os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+    sys.exit(f"Missing package ({exc.name}). Install them with: python3 -m pip install -r requirements.txt")
+
 from slam import params as params_mod  # noqa: E402
 from slam.evaluation import load_ground_truth  # noqa: E402
 from slam.explorer import Explorer  # noqa: E402
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXAMPLE_GT = os.path.join(BASE_DIR, "data", "slam", "ground_truth_example.json")
 
 
