@@ -26,7 +26,7 @@ from . import params as params_mod
 from .calibration import Calibrator
 from .driver import Abort, Driver, wrap
 from .evaluation import comparison_image, evaluate, gt_to_world, gt_walls_world, world_to_gt
-from .grid import OccupancyGrid, border_mask
+from .grid import OCCUPIED, OccupancyGrid, border_mask
 from .planner import Costmap, choose_frontier_goal, plan_to, simplify_path
 from .results import render_map, write_grid_csv, write_report
 from .scan import ScanMatcher, beams_to_world, bin_samples, correct_range, sensor_origin
@@ -705,7 +705,7 @@ class Explorer:
         return "moved"
 
     def grid_move(self, here, nxt):
-        """Turn to the grid axis, centre, check the edge ahead with the ToF, drive one cell."""
+        """Centre in the cell, turn to the grid axis, check the edge ahead with the ToF, drive one cell."""
         p, model = self.p, self.grid_model
         self._checkpoint()
         if self._finish:
@@ -715,8 +715,12 @@ class Explorer:
         x, y, th = self.pose()
         err = wrap(heading - th)
         if abs(err) > math.radians(p["turn_tolerance_deg"]):
+            # turning in place sweeps the corners: be in the middle of the cell first
+            self.center_in_cell(here)
+            self._make_room_to_turn()
             self.detail = f"turning {math.degrees(err):+.0f} deg"
-            self.driver.turn_by(err)
+            x, y, th = self.pose()
+            self.driver.turn_by(wrap(heading - th))
         # centre on the line through the two cell centres (mecanum strafe)
         x, y, th = self.pose()
         cx, cy = gm.cell_center(model, here)
@@ -751,6 +755,58 @@ class Explorer:
             self.log(f"Emergency stop after {moved:.2f} m on the way to cell {nxt}", "warn")
             return False
         return True
+
+    def center_in_cell(self, cell):
+        """Move to the cell centre without turning: forward/back, then sideways."""
+        p = self.p
+        cx, cy = gm.cell_center(self.grid_model, cell)
+        x, y, th = self.pose()
+        fwd = (cx - x) * math.cos(th) + (cy - y) * math.sin(th)
+        if abs(fwd) > p["grid_center_tol_m"]:
+            self.detail = f"centring {fwd * 100:+.0f} cm forward"
+            self.driver.forward(fwd, on_tof=self._moving_tof)
+        x, y, th = self.pose()
+        left = -(cx - x) * math.sin(th) + (cy - y) * math.cos(th)
+        if abs(left) > p["grid_center_tol_m"]:
+            self.detail = f"centring {left * 100:+.0f} cm sideways"
+            self.driver.strafe(left)
+
+    def turn_clearance(self):
+        """(distance from the robot centre to the nearest wall in the map, direction to it)."""
+        with self.lock:
+            cls = self.output_classes()
+            grid = self.grid
+        x, y, _ = self.pose()
+        reach = self.p["turn_radius_m"] + 0.15
+        r0, c0 = grid.world_to_cell(x - reach, y - reach)
+        r1, c1 = grid.world_to_cell(x + reach, y + reach)
+        r0, c0 = max(0, int(r0)), max(0, int(c0))
+        r1, c1 = min(grid.rows, int(r1) + 1), min(grid.cols, int(c1) + 1)
+        occ = np.argwhere(cls[r0:r1, c0:c1] == OCCUPIED)
+        if occ.size == 0:
+            return math.inf, 0.0
+        wx, wy = grid.cell_to_world(occ[:, 0] + r0, occ[:, 1] + c0)
+        d = np.hypot(wx - x, wy - y) - grid.res / 2
+        i = int(np.argmin(d))
+        return float(d[i]), math.atan2(wy[i] - y, wx[i] - x)
+
+    def _make_room_to_turn(self):
+        """If a wall is inside the turning circle, slide straight away from it first."""
+        need = self.p["turn_radius_m"] + 0.02
+        for _ in range(2):
+            gap, direction = self.turn_clearance()
+            if gap >= need:
+                return
+            move = min(need - gap, 0.12)
+            x, y, th = self.pose()
+            away = direction + math.pi
+            fwd, left = move * math.cos(away - th), move * math.sin(away - th)
+            self.log(f"Wall {gap * 100:.0f} cm from the robot centre - moving {move * 100:.0f} cm away before "
+                     f"turning", "debug")
+            if abs(fwd) > 0.01:
+                self.driver.forward(fwd)
+            if abs(left) > 0.01:
+                self.driver.strafe(left)
 
     def _edge_near_seen(self, sg):
         """Only show unknown edges next to explored space (not the empty ring)."""

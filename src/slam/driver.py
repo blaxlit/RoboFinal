@@ -82,6 +82,9 @@ class Driver:
     def stop(self):
         self.io.stop()
 
+    def _k(self):
+        return max(0.1, self.p.get("speed_percent", 100.0) / 100.0)
+
     # ---- gimbal -----------------------------------------------------------------------
     def gimbal_goto(self, yaw_deg, pitch_deg=None, tol=1.0, timeout=6.0, speed=None):
         speed = speed or self.p["gimbal_move_speed_dps"]
@@ -132,9 +135,11 @@ class Driver:
                 err = wrap(target - self.odom_pose()[2])
                 if abs(err) < tol:
                     break
-                rate = max(-self.p["angular_speed_dps"], min(self.p["angular_speed_dps"], math.degrees(err) * 2.5))
-                if abs(rate) < 12.0:
-                    rate = math.copysign(12.0, rate)
+                top = self.p["angular_speed_dps"] * self._k()
+                low = min(top, self.p["min_turn_speed_dps"])
+                rate = max(-top, min(top, math.degrees(err) * 2.5))
+                if abs(rate) < low:
+                    rate = math.copysign(low, rate)
                 self._drive(0.0, rate)
                 if on_tick:
                     on_tick()
@@ -150,8 +155,9 @@ class Driver:
         x0, y0, th0 = self.odom_pose()
         sign = 1.0 if distance >= 0 else -1.0
         dist = abs(distance)
-        speed = self.p["linear_speed_mps"]
-        timeout = timeout or (dist / max(speed, 0.02) * 2.5 + 3.0)
+        speed = self.p["linear_speed_mps"] * self._k()
+        slow = min(speed, self.p["slow_speed_mps"])
+        timeout = timeout or (dist / max(slow, 0.02) * 1.5 + dist / max(speed, 0.02) * 2.5 + 3.0)
         end = self.io.now() + timeout
         blocked = False
         last_tof_t = self.io.now()
@@ -180,7 +186,7 @@ class Driver:
                     blocked = remaining > 0.08
                     self.last_blocked_range = front
                     break
-                v = min(speed, max(0.06, remaining * 1.5))
+                v = min(speed, max(slow, remaining * 1.5))
                 herr = wrap(th0 - th)
                 self._drive(sign * v, max(-30.0, min(30.0, math.degrees(herr) * 2.0)))
                 if on_tick:
@@ -199,8 +205,9 @@ class Driver:
         x0, y0, th0 = self.odom_pose()
         sign = 1.0 if distance_left >= 0 else -1.0
         dist = abs(distance_left)
-        speed = min(self.p["linear_speed_mps"], 0.2)
-        end = self.io.now() + (timeout or dist / max(speed, 0.02) * 3 + 2.0)
+        speed = self.p["strafe_speed_mps"] * self._k()
+        slow = min(speed, self.p["slow_speed_mps"])
+        end = self.io.now() + (timeout or dist / max(slow, 0.02) * 2 + 2.0)
         lx, ly = -math.sin(th0), math.cos(th0)
         try:
             while self.io.now() < end:
@@ -210,7 +217,7 @@ class Driver:
                 remaining = dist - moved
                 if remaining <= 0.008:
                     break
-                v = min(speed, max(0.05, remaining * 1.5))
+                v = min(speed, max(slow, remaining * 1.5))
                 herr = wrap(th0 - th)
                 self.io.drive(0.0, self.p["odom_y_sign"] * sign * v,
                               self.p["cmd_z_sign"] * max(-30.0, min(30.0, math.degrees(herr) * 2.0)))

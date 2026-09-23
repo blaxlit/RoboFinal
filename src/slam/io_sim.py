@@ -54,7 +54,12 @@ class SimRobotIO:
         self.tof = collections.deque(maxlen=4000)
         self._pending_tof = collections.deque()
         self._next_tof = 0.0
-        self.collisions = 0
+        self.collisions = 0          # times the robot body touched a wall
+        self._touching = False
+        self.body = (0.32, 0.24)     # RoboMaster EP chassis, length x width (m)
+        t = np.linspace(-0.5, 0.5, 9)
+        self._outline = (np.concatenate([t, t, np.full(9, -0.5), np.full(9, 0.5)]) * self.body[0],
+                         np.concatenate([np.full(9, -0.5), np.full(9, 0.5), t, t]) * self.body[1])
         self.mode = "free"
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -87,10 +92,15 @@ class SimRobotIO:
         nth = th + wt * dt
         nx = x + (vxt * math.cos(th) - vyt * math.sin(th)) * dt
         ny = y + (vxt * math.sin(th) + vyt * math.cos(th)) * dt
-        if self._clearance(nx, ny) < 0.12:
-            nx, ny = x, y
-            if abs(vxt) + abs(vyt) > 1e-3:
+        if self._footprint_hits(nx, ny, nth):
+            # blocked: the body would overlap a wall (turning included)
+            if not self._touching:
                 self.collisions += 1
+                self._touching = True
+            nx, ny, nth = x, y, th
+            wt = 0.0
+        else:
+            self._touching = False
         dxw, dyw = nx - x, ny - y
         self.true = [nx, ny, nth]
         # odometry: body-frame motion integrated with scale error and drift
@@ -137,6 +147,21 @@ class SimRobotIO:
             u = ((s[:, 0] - x) * dy - (s[:, 1] - y) * dx) / den
         ok = (np.abs(den) > 1e-9) & (t > 0) & (u >= 0) & (u <= 1)
         return float(t[ok].min()) if ok.any() else 99.0
+
+    def _footprint_hits(self, x, y, th):
+        """True if the robot rectangle at (x, y, th) touches a wall."""
+        length, width = self.body
+        if self._clearance(x, y) > math.hypot(length, width) / 2 + 0.01:
+            return False  # far from every wall
+        c, s = math.cos(th), math.sin(th)
+        fx, fy = self._outline
+        px, py = x + c * fx - s * fy, y + s * fx + c * fy
+        seg = self.segs
+        ex, ey = seg[:, 2] - seg[:, 0], seg[:, 3] - seg[:, 1]
+        l2 = np.maximum(ex * ex + ey * ey, 1e-12)
+        u = np.clip(((px[:, None] - seg[:, 0]) * ex + (py[:, None] - seg[:, 1]) * ey) / l2, 0, 1)
+        d = np.hypot(seg[:, 0] + u * ex - px[:, None], seg[:, 1] + u * ey - py[:, None])
+        return bool((d < 0.005).any())
 
     def _clearance(self, x, y):
         s = self.segs

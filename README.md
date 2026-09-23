@@ -118,6 +118,10 @@ then repeats *scan → move one cell → scan* until every reachable cell is
 explored. **STOP** (or Space) halts all motion, **Pause** freezes the mission,
 **Finish & report** ends it and writes the report.
 
+**Speeds** are all adjustable, live, in Control > Speed (and Settings > Speed):
+a master speed % plus driving, arriving (slowest), strafing, turning and scan
+speeds; Settings also has the slowest turn speed and the gimbal speed.
+
 Keys: Space = STOP, W/A/S/D = drive/strafe, Q/E = rotate, F = fit map,
 R = follow robot, +/- or mouse wheel = zoom, drag = pan.
 
@@ -125,7 +129,7 @@ R = follow robot, +/- or mouse wheel = zoom, drag = pan.
 | --- | --- |
 | Map | Live map, trajectory, last scan, plan, grid walls (unknown edges dashed), ground truth. Layers: Clean (grid map) · Maze · Path · Scan · Plan · GT. Modes: **Go to** (click) · **Set pose** (drag) · **Border** (drag the area to explore and score) · **GT wall** / **GT arena** (draw the ground truth). |
 | Status | Map Accuracy, Coverage, position, start, grid, ToF, mission report (start / end), charts over the whole run, last scan. |
-| Control | Manual drive, rotate robot (left / right 90°, 180°), scan now, go home, auto calibrate, clear map, new session, re-detect grid. |
+| Control | Manual drive, speed sliders, rotate robot (left / right 90°, 180°), scan now, go home, auto calibrate, clear map, new session, re-detect grid. |
 | Settings | The essential settings; tick *show all settings* for everything. **Save settings** writes `config/slam_settings.yaml`. |
 | Ground truth | Load / draw / save the arena map and set where the robot starts in it. |
 | Results | The run folder's files and the latest saved map. |
@@ -145,8 +149,12 @@ The arena is treated as a maze whose walls lie on a square grid
   and every grid edge is voted *wall / open / unknown*: a wall seen along part
   of an edge becomes the whole edge (gaps filled), blobs off the grid lines
   disappear.
-- **Grid by grid** – every step moves exactly one cell and then scans: turn to
-  the grid axis, strafe back onto the cell's centre line (mecanum wheels),
+- **Grid by grid** – every step moves exactly one cell and then scans. Before
+  turning, the robot moves back to the exact middle of the cell (forward/back
+  and sideways) and checks that no wall is inside its turning circle
+  (`turn_radius_m`, the half-diagonal of the chassis) – turning off-centre is
+  what swings a wheel into a wall. Then: turn to the grid axis, strafe onto
+  the cell's centre line (mecanum wheels),
   check with the ToF that the edge ahead is open (a wall there marks the edge
   closed and the robot does not move), drive to the next cell centre, never
   closer to a wall than `stop_distance_m`. Routes go through open edges to the

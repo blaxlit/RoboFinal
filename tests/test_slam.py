@@ -276,6 +276,7 @@ class MissionTest(unittest.TestCase):
             self.assertIn("gt", rep["end"])
             self.assertGreater(rep["metrics"]["coverage_pct"], 5)
             self.assertLess(rep["end_error_m"], 0.15)
+            self.assertEqual(io.collisions, 0, "the robot body touched a wall")
             ex.set_params({"scan_speed_dps": 30})
             self.assertEqual(ex.p["scan_speed_dps"], 30.0)
         finally:

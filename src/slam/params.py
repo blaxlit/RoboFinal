@@ -43,12 +43,10 @@ PARAMS = {
                   "sweep = turn the gimbal smoothly (fast); step = stop at each angle and average (accurate).", False),
     "scan_start_deg": (-180.0, "float", -250.0, 0.0, 5.0, "Scan", "Gimbal scan start (deg from chassis front).", False),
     "scan_end_deg": (180.0, "float", 0.0, 250.0, 5.0, "Scan", "Gimbal scan end (deg).", False),
-    "scan_speed_dps": (45.0, "float", 5.0, 300.0, 5.0, "Scan", "Gimbal speed during a sweep (deg/s).", False),
     "scan_step_deg": (2.0, "float", 0.5, 15.0, 0.5, "Scan", "Angle between beams (sweep bin width / step size).", False),
     "samples_per_step": (4, "int", 1, 20, 1, "Scan", "ToF readings averaged at each step (step mode).", False),
     "settle_s": (0.12, "float", 0.0, 1.0, 0.02, "Scan", "Wait after each gimbal step before reading (s).", False),
     "scan_pitch_deg": (0.0, "float", -20.0, 25.0, 1.0, "Scan", "Gimbal pitch while scanning.", False),
-    "gimbal_move_speed_dps": (240.0, "float", 30.0, 540.0, 10.0, "Scan", "Gimbal speed for repositioning moves.", False),
     "alternate_sweep": (True, "bool", None, None, None, "Scan", "Sweep back and forth to save time.", False),
     "tof_min_m": (0.08, "float", 0.0, 1.0, 0.01, "Scan", "Readings shorter than this are ignored.", False),
     "tof_max_m": (3.0, "float", 0.5, 10.0, 0.1, "Scan", "Readings longer than this are treated as no wall.", False),
@@ -80,10 +78,19 @@ PARAMS = {
     "gimbal_yaw_sign": (-1, "int", -1, 1, 2, "Localisation", "-1 if a positive gimbal yaw turns right.", False),
     "cmd_z_sign": (1, "int", -1, 1, 2, "Localisation", "+1 if a positive chassis z command turns left.", False),
 
+    # ---- speeds ------------------------------------------------------------------
+    "speed_percent": (100.0, "float", 10.0, 200.0, 5.0, "Speed", "Master speed: scales driving, turning and strafing.", False),
+    "linear_speed_mps": (0.25, "float", 0.05, 1.0, 0.01, "Speed", "Driving speed (m/s).", False),
+    "slow_speed_mps": (0.06, "float", 0.02, 0.3, 0.01, "Speed", "Slowest driving speed, used when arriving (m/s).", False),
+    "strafe_speed_mps": (0.15, "float", 0.03, 0.6, 0.01, "Speed", "Sideways speed when centring in a cell (m/s).", False),
+    "angular_speed_dps": (60.0, "float", 10.0, 300.0, 5.0, "Speed", "Turning speed (deg/s).", False),
+    "min_turn_speed_dps": (12.0, "float", 2.0, 60.0, 1.0, "Speed", "Slowest turning speed at the end of a turn (deg/s).", False),
+    "scan_speed_dps": (45.0, "float", 5.0, 300.0, 5.0, "Speed", "Gimbal speed during a scan sweep (deg/s).", False),
+    "gimbal_move_speed_dps": (240.0, "float", 30.0, 540.0, 10.0, "Speed", "Gimbal speed for repositioning moves (deg/s).", False),
+
     # ---- motion ------------------------------------------------------------------
-    "linear_speed_mps": (0.25, "float", 0.05, 1.0, 0.05, "Motion", "Driving speed (m/s).", False),
-    "angular_speed_dps": (60.0, "float", 10.0, 300.0, 5.0, "Motion", "Turning speed (deg/s).", False),
     "turn_tolerance_deg": (2.0, "float", 0.5, 10.0, 0.5, "Motion", "Stop turning within this angle.", False),
+    "turn_radius_m": (0.21, "float", 0.1, 0.5, 0.01, "Motion", "Half-diagonal of the robot: space it needs to turn in place (m).", False),
     "robot_radius_m": (0.20, "float", 0.1, 0.5, 0.01, "Motion", "Closest the robot centre may get to a wall (m).", False),
     "safety_margin_m": (0.10, "float", 0.0, 0.5, 0.01, "Motion", "Paths prefer to stay this much further from walls (m).", False),
     "stop_distance_m": (0.15, "float", 0.05, 1.0, 0.01, "Motion", "Emergency stop when the forward ToF (lens to wall) reads less than this.", False),
@@ -131,7 +138,6 @@ PARAMS = {
 # the settings shown when "all settings" is off in the console
 ESSENTIAL = [
     "grid_mode", "grid_cell_m", "grid_start_centered", "linear_speed_mps", "angular_speed_dps", "scan_mode",
-    "scan_speed_dps", "tof_max_m", "stop_distance_m", "robot_radius_m", "calibration", "return_home",
     "max_time_s", "border_enabled", "border_min_x", "border_min_y", "border_max_x", "border_max_y",
     "gimbal_yaw_sign",
 ]

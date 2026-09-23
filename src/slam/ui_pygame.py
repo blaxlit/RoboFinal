@@ -332,6 +332,7 @@ class Console:
         self.inputs = {"turn": 30.0, "move": 0.3, "gx": 0.0, "gy": 0.0, "gim": 90.0, "wall": 0.5,
                        "spx": 0.0, "spy": 0.0, "spt": 0.0, "speed": 0.25, "turn_rate": 45.0}
         self.kbd_drive = True
+        self._speed_edit = {}
         self.driving = False
         self.last_drive = 0.0
         self.draft = {"name": "arena", "border": None, "walls": [], "wall_thickness": 0.02}
@@ -1212,6 +1213,25 @@ class Console:
         ui.label(f"{inp['turn_rate']:.0f} °/s", x + w, y + 34, "m", align="right")
         self.kbd_drive = ui.checkbox(pygame.Rect(sx, y + 60, 200, 22), self.kbd_drive, "keyboard drive")
         y += 100
+        y = self.section("Speed (applies to missions and commands)", x, y)
+        for key, label, lo, hi, fmt in (
+                ("speed_percent", "master", 10, 200, "{:.0f} %"),
+                ("linear_speed_mps", "drive", 0.05, 1.0, "{:.2f} m/s"),
+                ("slow_speed_mps", "arrive", 0.02, 0.3, "{:.2f} m/s"),
+                ("strafe_speed_mps", "strafe", 0.03, 0.6, "{:.2f} m/s"),
+                ("angular_speed_dps", "turn", 10, 300, "{:.0f} °/s"),
+                ("scan_speed_dps", "scan", 5, 300, "{:.0f} °/s")):
+            ui.label(label, x, y + 3, "s", "muted")
+            slider_key = "sp-" + key
+            shown = self._speed_edit.get(key, self.p[key])
+            val = ui.slider(slider_key, pygame.Rect(x + 60, y + 1, w - 60 - 90, 20), shown, lo, hi)
+            if ui.drag_key == slider_key:
+                self._speed_edit[key] = val
+            elif key in self._speed_edit:
+                self.set_params(**{key: round(self._speed_edit.pop(key), 3)})
+            ui.label(fmt.format(val), x + w, y + 3, "m", align="right")
+            y += 28
+        y += 8
         y = self.section("Rotate robot", x, y)
         bx = x
         for lbl, deg in (("Left 90°", 90), ("Right 90°", -90), ("Turn 180°", 180)):
