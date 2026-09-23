@@ -537,6 +537,12 @@ function draw() {
   const p = S.params;
   if (p.border_enabled) { ctx.setLineDash([6, 4]); poly([[p.border_min_x, p.border_min_y], [p.border_max_x, p.border_min_y], [p.border_max_x, p.border_max_y], [p.border_min_x, p.border_max_y]], css("--warn"), 2, true); ctx.setLineDash([]); }
   if (S.layers.gt) drawGt();
+  if (S.snap && S.snap.grid && S.layers.plan) {
+    ctx.setLineDash([5, 4]);
+    for (const w of S.snap.grid.unknown || []) poly([[w[0], w[1]], [w[2], w[3]]], css("--warn"), 2);
+    ctx.setLineDash([]);
+    for (const w of S.snap.grid.walls || []) poly([[w[0], w[1]], [w[2], w[3]]], css("--accent-2"), 3);
+  }
   const s = S.snap;
   if (s && S.layers.plan && s.plan) {
     for (const f of s.plan.frontiers || []) { const [x, y] = w2s(f[0], f[1]); ctx.beginPath(); ctx.arc(x, y, 3 + Math.min(8, Math.sqrt(f[2])), 0, 7); ctx.strokeStyle = css("--ok"); ctx.lineWidth = 1.5; ctx.stroke(); }

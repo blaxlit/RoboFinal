@@ -137,11 +137,24 @@ def write_report(out_dir, report):
         lines.append(f"- **Coverage (inside border) = {m['coverage_pct']:.2f} %** — load a ground truth for accuracy")
     else:
         lines.append(f"- Mapped area: {m.get('known_area_m2', 0)} m² — load a ground truth or set a border for scores")
+    if m.get("raw"):
+        r = m["raw"]
+        lines.append(f"- Scores above are for the clean grid map; the raw occupancy map scores "
+                     f"{r.get('accuracy_pct', '–')} % accuracy / {r.get('coverage_pct', '–')} % coverage")
+    if m.get("grid"):
+        g = m["grid"]
+        lines += ["", "## Grid", "",
+                  f"- Cell size {g['cell_m']} m, grid angle {g['theta_deg']}° to the start heading, "
+                  f"offset ({g['offset_u_m']}, {g['offset_v_m']}) m, fit score {g['score']}"
+                  + ("" if g.get("cell_trusted") else " (cell size not confirmed)")]
+        if "walls" in g:
+            lines.append(f"- {g['walls']} wall edges, {g['open']} open edges, {g['cells_seen']} cells explored")
     if report.get("calibration"):
         lines += ["", "## Calibration", ""] + [f"- {k}: {v}" for k, v in report["calibration"].items()]
     lines += ["", "## Files", "",
-              "- `map.png` map with trajectory, start (green) and end (red)",
-              "- `map_grid.csv` / `map_prob.npy` the grid itself",
+              "- `map.png` map with trajectory, start (green) and end (red); `map_raw.png` before grid clean-up",
+              "- `map_grid.png` clean maze map drawn straight on its grid, `grid_model.json` every cell edge",
+              "- `map_cells.csv` / `map_prob.npy` the map cells themselves",
               "- `trajectory.csv` robot path (map + odometry frames)",
               "- `log_events.csv`, `log_scans_raw.csv`, `log_scans_filtered.csv` exploration logs",
               "- `comparison.png` ground truth check (white/black correct, red missed wall, orange false wall, grey unexplored)"]

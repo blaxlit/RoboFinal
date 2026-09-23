@@ -48,8 +48,8 @@ MODE_HINTS = {"goto": "Click where the robot should drive",
               "border": "Drag a rectangle: exploration and scoring stay inside it",
               "wall": "Drag along a real wall (arena frame, snapped)",
               "gtborder": "Drag the arena's outer rectangle"}
-LAYERS = [("prob", "Prob"), ("traj", "Path"), ("scan", "Scan"), ("plan", "Plan"), ("gt", "GT"),
-          ("grid", "Grid"), ("truth", "Truth")]
+LAYERS = [("clean", "Clean"), ("maze", "Maze"), ("prob", "Prob"), ("traj", "Path"), ("scan", "Scan"),
+          ("plan", "Plan"), ("gt", "GT"), ("grid", "Lines"), ("truth", "Truth")]
 CHARTS = [("tof", "ToF"), ("cov", "Coverage"), ("speed", "Speed"), ("match", "Drift fix"), ("loc_error", "Loc err")]
 SNAPS = [0.01, 0.05, 0.1, 0.3, 0.6]
 
@@ -315,7 +315,9 @@ class Console:
         self.fitted = False
         self.follow = False
         self.mode = "pan"
-        self.layers = {"prob": False, "traj": True, "scan": True, "plan": True, "gt": True, "grid": True, "truth": True}
+        self.layers = {"clean": True, "maze": True, "prob": False, "traj": True, "scan": True, "plan": True,
+                       "gt": True, "grid": True, "truth": True}
+        self.grid_seen = -1
         self.drag = None
         self._map_cache = (None, None)
         # panel state
@@ -374,13 +376,21 @@ class Console:
                            param_version=self.param_version, traj_from=self.traj_len)
         self.snap = snap
         g = ex.grid
+        if ex.grid_version != self.grid_seen and self.map is not None and self.map.get("grid") is g:
+            self.grid_seen = ex.grid_version
+            with ex.lock:
+                self.map["clean"] = None if ex.snapped is None else ex.snapped.copy()
+            self._map_cache = (None, None)
         if g.version != self.map_version or self.map is None or self.map.get("grid") is not g:
             with ex.lock:
                 cls = ex.classes()
                 prob = g.probability()
                 version = g.version
+            with ex.lock:
+                clean = None if ex.snapped is None else ex.snapped.copy()
             self.map = {"grid": g, "rows": g.rows, "cols": g.cols, "res": g.res, "ox": g.origin_x, "oy": g.origin_y,
-                        "cls": cls, "prob": prob}
+                        "cls": cls, "prob": prob, "clean": clean}
+            self.grid_seen = ex.grid_version
             self.map_version = version
             self._map_cache = (None, None)
         tr = snap["traj"]
@@ -625,6 +635,11 @@ class Console:
             for wl in self.draft_walls_world():
                 self.poly([(wl[0], wl[1]), (wl[2], wl[3])], "violet", 2)
         s = self.snap
+        if s and self.layers["maze"] and s.get("grid"):
+            for wl in s["grid"].get("unknown", []):
+                self.poly([(wl[0], wl[1]), (wl[2], wl[3])], "warn", 2, dash=True)
+            for wl in s["grid"].get("walls", []):
+                self.poly([(wl[0], wl[1]), (wl[2], wl[3])], "accent2", 3)
         if s and self.layers["plan"] and s.get("plan"):
             plan = s["plan"]
             for f in plan.get("frontiers") or []:
@@ -687,12 +702,13 @@ class Console:
             rgb[unk] = pal["unknown"]
         else:
             lut = np.array([pal["unknown"], pal["free"], pal["wall"]], np.uint8)
-            rgb = lut[m["cls"]]
+            use = m["clean"] if self.layers["clean"] and m.get("clean") is not None else m["cls"]
+            rgb = lut[use]
         return rgb
 
     def blit_map(self, rect):
         m, v = self.map, self.view
-        key = (self.map_version, id(m["grid"]), self.ui.theme, self.layers["prob"], round(v["cx"], 4),
+        key = (self.map_version, self.grid_seen, self.layers["clean"], id(m["grid"]), self.ui.theme, self.layers["prob"], round(v["cx"], 4),
                round(v["cy"], 4), round(v["scale"], 3), round(v["rot"], 2), rect.size)
         if self._map_cache[0] == key:
             surf, pos = self._map_cache[1]
@@ -1035,6 +1051,13 @@ class Console:
             t = s["true_pose"]
             err = math.hypot(t["x"] - s["pose"]["x"], t["y"] - s["pose"]["y"]) * 100
             rows.append(("Simulator truth", f"{fpose(t)} ({err:.1f} cm)"))
+        g = s.get("grid")
+        if g:
+            rows.append(("Maze grid", f"{g['cell_m']:.3f} m cells, {g['theta_deg']:+.1f}°"
+                         + ("" if g["cell_trusted"] else " (checking)")))
+            if "walls" in m.get("grid", {}):
+                mg = m["grid"]
+                rows.append(("Edges wall / open, cells", f"{mg['walls']} / {mg['open']}, {mg['cells_seen']} seen"))
         rows += [("ToF ahead", "no reading" if s["tof_m"] is None else f"{s['tof_m']:.3f} m"),
                  ("Gimbal yaw", f"{s['gimbal_deg']:.1f}°")]
         y = self.kv(rows, x, y, w) + 10
@@ -1239,7 +1262,18 @@ class Console:
             if ui.button(pygame.Rect(bx, y, bw, 28), lbl):
                 fn()
             bx += bw + 6
-        return y + 36
+        y += 36
+        y = self.section("Maze grid", x, y + 4)
+        g = (self.snap or {}).get("grid")
+        info = "not found yet" if not g else (f"{g['cell_m']:.3f} m cells, angle {g['theta_deg']:+.1f}°, "
+                                              + ("locked" if g["cell_trusted"] else "cell size not confirmed yet"))
+        for ln in ui.wrap(info + ". Set Settings > Grid > grid_mode = fixed and grid_cell_m to your tile size "
+                          "to lock it at once.", "s", w):
+            ui.label(ln, x, y, "s", "muted")
+            y += 18
+        if ui.button(pygame.Rect(x, y + 4, 130, 28), "Re-detect grid"):
+            self.cmd("redetect_grid")
+        return y + 40
 
     def _new_session(self):
         self.cmd("reset_all")

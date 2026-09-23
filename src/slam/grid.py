@@ -141,7 +141,7 @@ class OccupancyGrid:
     def probability(self):
         return 1.0 - 1.0 / (1.0 + np.exp(self.logodds))
 
-    def classify(self, occ_prob, free_prob, clean_isolated=False):
+    def classify(self, occ_prob, free_prob, clean_isolated=False, min_blob=2):
         """uint8 grid of UNKNOWN / FREE / OCCUPIED."""
         occ_l = prob_to_logodds(occ_prob)
         free_l = prob_to_logodds(free_prob)
@@ -149,7 +149,7 @@ class OccupancyGrid:
         out[self.logodds <= free_l] = FREE
         occ = self.logodds >= occ_l
         if clean_isolated:
-            occ = remove_isolated(occ)
+            occ = remove_small_blobs(occ, min_blob)
         out[occ] = OCCUPIED
         return out
 
@@ -157,13 +157,13 @@ class OccupancyGrid:
         return self.logodds >= prob_to_logodds(occ_prob)
 
 
-def remove_isolated(mask):
-    """Drop True cells that have no True 8-neighbour (single-cell noise)."""
-    m = mask.astype(np.uint8)
-    kernel = np.ones((3, 3), np.float32)
-    kernel[1, 1] = 0
-    neighbours = cv2.filter2D(m, -1, kernel, borderType=cv2.BORDER_CONSTANT)
-    return mask & (neighbours > 0)
+def remove_small_blobs(mask, min_cells):
+    """Drop connected groups of True cells smaller than min_cells."""
+    if min_cells <= 1:
+        return mask
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    small = np.flatnonzero(stats[:, cv2.CC_STAT_AREA] < min_cells)
+    return mask & ~np.isin(labels, small[small > 0])
 
 
 def border_mask(grid, params):

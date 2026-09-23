@@ -188,6 +188,36 @@ class Driver:
         travelled = sign * ((x - x0) * math.cos(th0) + (y - y0) * math.sin(th0))
         return abs(travelled), blocked
 
+    def strafe(self, distance_left, on_tick=None, timeout=None):
+        """Slide sideways (mecanum) without turning; + = left. Returns metres moved."""
+        self._motion_mode()
+        x0, y0, th0 = self.odom_pose()
+        sign = 1.0 if distance_left >= 0 else -1.0
+        dist = abs(distance_left)
+        speed = min(self.p["linear_speed_mps"], 0.2)
+        end = self.io.now() + (timeout or dist / max(speed, 0.02) * 3 + 2.0)
+        lx, ly = -math.sin(th0), math.cos(th0)
+        try:
+            while self.io.now() < end:
+                self.checkpoint()
+                x, y, th = self.odom_pose()
+                moved = sign * ((x - x0) * lx + (y - y0) * ly)
+                remaining = dist - moved
+                if remaining <= 0.008:
+                    break
+                v = min(speed, max(0.05, remaining * 1.5))
+                herr = wrap(th0 - th)
+                self.io.drive(0.0, self.p["odom_y_sign"] * sign * v,
+                              self.p["cmd_z_sign"] * max(-30.0, min(30.0, math.degrees(herr) * 2.0)))
+                if on_tick:
+                    on_tick()
+                self.io.sleep(0.03)
+        finally:
+            self._drive(0.0, 0.0)
+        self.io.sleep(0.15)
+        x, y, _ = self.odom_pose()
+        return abs((x - x0) * lx + (y - y0) * ly)
+
     def manual(self, vx, vy_left, wz_ccw_dps):
         self.io.set_mode("chassis_lead")  # no re-centre here: it would block the dead-man loop
         self.io.drive(vx, self.p["odom_y_sign"] * vy_left, self.p["cmd_z_sign"] * wz_ccw_dps)

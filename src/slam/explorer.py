@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import yaml
 
+from . import gridmodel as gm
 from . import params as params_mod
 from .calibration import Calibrator
 from .driver import Abort, Driver, wrap
@@ -98,6 +99,7 @@ class Explorer:
             self.plan = None
             self.last_scan = None
             self.start_pose = (0.0, 0.0, 0.0)
+            self._reset_grid_model()
             self._scan_id = 0
             self._last_beam_t = 0.0
             for s in self.series.values():
@@ -119,6 +121,18 @@ class Explorer:
                 w.writerow(header)
                 self._files[name] = (f, w)
         self.log(f"New session - logs in {self.run_dir}")
+
+    def _reset_grid_model(self):
+        self.grid_model = None
+        self.grid_edges = None
+        self.snapped = None
+        self.grid_version = 0
+        self.wall_pts = []            # (points Nx2, wall angles N) per scan
+        self.grid_history = []        # earlier detections, to confirm the cell size
+        self.scanned_cells = set()
+        self.cell_tries = collections.Counter()
+        self.blocked_edges = set()
+        self._view_aligned = False
 
     def _make_grid(self):
         p = self.p
@@ -193,6 +207,7 @@ class Explorer:
                 self.blacklist[:] = False
                 self.plan = None
                 self.last_scan = None
+                self._reset_grid_model()
             self.log("Map cleared (pose kept)")
         elif name == "reset_all":
             if self.state not in ("IDLE", "DONE"):
@@ -202,6 +217,10 @@ class Explorer:
             self.mission = None
             self.last_report = None
             self.update_metrics()
+        elif name == "redetect_grid":
+            with self.lock:
+                self.grid_model = None
+            self.update_grid_model(log=True)
         elif name == "clear_blacklist":
             with self.lock:
                 self.blacklist[:] = False
@@ -235,8 +254,11 @@ class Explorer:
                 self.grid = self._make_grid()
                 self.blacklist = np.zeros((self.grid.rows, self.grid.cols), bool)
                 self.plan = None
+                self._reset_grid_model()
             self.log("Map size/resolution changed - map cleared", "warn")
         if applied:
+            if any(k.startswith("grid_") for k in applied) and self.wall_pts:
+                self.update_grid_model(log=True)
             self.update_metrics()
         return applied
 
@@ -421,6 +443,13 @@ class Explorer:
                     reason = f"coverage goal reached ({cov:.1f}%)"
                     break
                 self.state = "PLANNING"
+                if self.grid_ready():
+                    step = self.grid_step()
+                    self.stats["iterations"] += 1
+                    if step == "done":
+                        reason = "every reachable grid cell explored"
+                        break
+                    continue
                 info = self.plan_frontier()
                 if info is None:
                     reason = "no reachable frontier left - exploration complete"
@@ -495,6 +524,7 @@ class Explorer:
             self.series["match"].append((round(self.elapsed(), 2), round(math.hypot(dx, dy) * 100, 2)))
             if math.hypot(dx, dy) > 0.005 or abs(dth) > 0.3:
                 self.log(f"Scan {sid}: localisation corrected by ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {dth:+.1f} deg")
+        pose = self._snap_to_grid(pose, angles, ranges, hits, sid)
         true = self.true_pose_world()
         if true is not None:
             e_before = math.hypot(true[0] - guess[0], true[1] - guess[1])
@@ -523,7 +553,173 @@ class Explorer:
         n_hit = int(hits.sum())
         self.log(f"Scan {sid}: {len(samples)} readings -> {len(angles)} beams ({n_hit} walls) "
                  f"at ({pose[0]:.2f}, {pose[1]:.2f}, {math.degrees(pose[2]):.0f} deg)")
+        if p["grid_mode"] != "off":
+            wx, wy, _ = beams_to_world(pose, angles[hits], ranges[hits], p)
+            pts, ang = gm.oriented_points(wx, wy)
+            if len(pts):
+                self.wall_pts.append((pts, ang))
+            self.update_grid_model()
+            if self.grid_model is not None and self.grid_model.cell_trusted:
+                self.scanned_cells.add(gm.cell_of(self.grid_model, pose[0], pose[1]))
         self.update_metrics()
+
+    # ---- auto grid -------------------------------------------------------------------------------------------------
+    def _snap_to_grid(self, pose, angles, ranges, hits, sid):
+        """Nudge the scan pose so its walls sit on the grid (heading, then position)."""
+        p, model = self.p, self.grid_model
+        if p["grid_mode"] == "off" or not p["grid_snap_pose"] or model is None or not model.theta_locked \
+                or not hits.any():
+            return pose
+        wx, wy, _ = beams_to_world(pose, angles[hits], ranges[hits], p)
+        pts, ang = gm.oriented_points(wx, wy)
+        dx, dy, dth = gm.snap_pose(model, pose, pts, ang)
+        if abs(dx) + abs(dy) < 1e-4 and abs(dth) < 1e-5:
+            return pose
+        self.log(f"Scan {sid}: grid snap ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {math.degrees(dth):+.1f} deg")
+        return pose[0] + dx, pose[1] + dy, wrap(pose[2] + dth)
+
+    def update_grid_model(self, log=False):
+        p = self.p
+        if p["grid_mode"] == "off" or not self.wall_pts:
+            with self.lock:
+                self.grid_model = self.grid_edges = self.snapped = None
+            return
+        prev = self.grid_model
+        if prev is not None and prev.cell_trusted and not log:
+            model = prev  # locked: re-fitting to snapped points would let the grid drift with them
+        else:
+            pts = np.concatenate([a for a, _ in self.wall_pts[-80:]])
+            ang = np.concatenate([b for _, b in self.wall_pts[-80:]])
+            model = gm.detect(pts, ang, p, prev, self.grid_history)
+            if model is None:
+                return
+            self.grid_history = (self.grid_history + [model])[-5:]
+        if model is not prev and (prev is None or model.cell_trusted != prev.cell_trusted
+                                  or abs(model.cell - prev.cell) > 0.01 or log):
+            self.log(f"Grid: {'found' if model.cell_trusted else 'angle found'} - cell {model.cell:.3f} m, "
+                     f"angle {math.degrees(model.theta):+.1f} deg (score {model.score:.2f}"
+                     f"{'' if model.cell_trusted else ', cell size not trusted yet'})")
+        with self.lock:
+            classes = self.classes()
+            edges = gm.classify_edges(model, self.grid, classes, p) if model.cell_trusted else None
+            snapped = gm.render(model, edges, self.grid, p) if edges is not None else None
+            self.grid_model, self.grid_edges, self.snapped = model, edges, snapped
+            self.grid_version += 1
+        if model.cell_trusted and p["grid_align_view"] and not self._view_aligned:
+            self._view_aligned = True
+            self.set_params({"map_rotation_deg": round(-math.degrees(model.theta), 1)})
+
+    def grid_ready(self):
+        return (self.p["grid_mode"] != "off" and self.p["grid_drive"] and self.grid_model is not None
+                and self.grid_model.cell_trusted and self.grid_edges is not None)
+
+    def grid_plan(self):
+        """Nearest cell (through open edges) that still needs looking at."""
+        model, edges, p = self.grid_model, self.grid_edges, self.p
+        x, y, _ = self.pose()
+        start = gm.cell_of(model, x, y)
+        prev = {start: None}
+        queue_ = collections.deque([start])
+        inside = border_mask(self.grid, p) if p["border_enabled"] else None
+        while queue_:
+            c = queue_.popleft()
+            a, b = c[0] - edges.i0, c[1] - edges.j0
+            if not (0 <= a < edges.cell_free.shape[0] and 0 <= b < edges.cell_free.shape[1]):
+                continue
+            unseen = edges.cell_free[a, b] < p["grid_cell_seen_frac"]
+            needs = unseen or gm.unknown_count(edges, c) > 0
+            if c != start and needs and c not in self.scanned_cells and self.cell_tries[c] < 3:
+                if inside is not None:
+                    r, cc = self.grid.world_to_cell(*gm.cell_center(model, c))
+                    if not (self.grid.inside(r, cc) and inside[r, cc]):
+                        needs = False
+                if needs:
+                    path = [c]
+                    while prev[path[-1]] is not None:
+                        path.append(prev[path[-1]])
+                    return path[::-1]
+            for n in gm.neighbours(edges, c, self.blocked_edges):
+                if n not in prev:
+                    prev[n] = c
+                    queue_.append(n)
+        return None
+
+    def grid_step(self):
+        path = self.grid_plan()
+        if path is None:
+            return "done"
+        model = self.grid_model
+        target = path[-1]
+        self.cell_tries[target] += 1
+        centers = [gm.cell_center(model, c) for c in path]
+        with self.lock:
+            self.plan = {"frontiers": [], "goal": [round(v, 3) for v in centers[-1]],
+                         "path": [[round(x, 3), round(y, 3)] for x, y in [self.pose()[:2]] + centers[1:]]}
+        self.log(f"Grid: cell {path[0]} -> {target}, {len(path) - 1} cell(s)")
+        self.state = "MOVING"
+        self.grid_follow(path)
+        return "moved"
+
+    def grid_follow(self, path):
+        """Drive cell centre to cell centre along grid axes, centring on the way."""
+        p, model = self.p, self.grid_model
+        runs = []
+        for a, b in zip(path, path[1:]):
+            d = (b[0] - a[0], b[1] - a[1])
+            if runs and runs[-1][0] == d and not p["grid_stop_each_cell"]:
+                runs[-1][1].append(b)
+            else:
+                runs.append((d, [b]))
+        cur = path[0]
+        for d, cells in runs:
+            self._checkpoint()
+            if self._finish:
+                raise Finish()
+            heading = model.theta + math.atan2(d[1], d[0])
+            x, y, th = self.pose()
+            err = wrap(heading - th)
+            if abs(err) > math.radians(p["turn_tolerance_deg"]):
+                self.detail = f"turning {math.degrees(err):+.0f} deg"
+                self.driver.turn_by(err)
+            # centre on the line through the cell centres
+            x, y, th = self.pose()
+            cx, cy = gm.cell_center(model, cur)
+            lx, ly = -math.sin(heading), math.cos(heading)
+            off = (cx - x) * lx + (cy - y) * ly
+            if abs(off) > p["grid_center_tol_m"]:
+                self.detail = f"centring {off * 100:+.0f} cm"
+                self.driver.strafe(off)
+            ex, ey = gm.cell_center(model, cells[-1])
+            x, y, _ = self.pose()
+            dist = (ex - x) * math.cos(heading) + (ey - y) * math.sin(heading)
+            self.detail = f"to cell {cells[-1]} ({dist:.2f} m)"
+            moved, blocked = self.driver.forward(dist, on_tof=self._moving_tof) if dist > 0.02 else (0.0, False)
+            if blocked:
+                # something is in the way: treat the next edge as closed
+                self.stats["blocked_moves"] += 1
+                nxt = cells[min(len(cells) - 1, int(moved / model.cell + 0.5))]
+                prv = cur if nxt == cells[0] else cells[cells.index(nxt) - 1]
+                self.blocked_edges.add(frozenset((prv, nxt)))
+                self.log(f"Emergency stop between cells {prv} and {nxt} - treating that edge as a wall", "warn")
+                return False
+            cur = cells[-1]
+            if p["grid_scan_each_cell"] and cur != path[-1]:
+                self.state_scan_between_legs()
+        return True
+
+    def _edge_near_seen(self, sg):
+        """Only show unknown edges next to explored space (not the empty ring)."""
+        x, y = (sg[0] + sg[2]) / 2, (sg[1] + sg[3]) / 2
+        r, c = self.grid.world_to_cell(x, y)
+        r0, r1 = max(0, r - 3), min(self.grid.rows, r + 4)
+        c0, c1 = max(0, c - 3), min(self.grid.cols, c + 4)
+        return bool((self.grid.logodds[r0:r1, c0:c1] < 0).any())
+
+    def output_classes(self):
+        """The map that is saved and scored: the clean grid map when there is one."""
+        if self.p["grid_mode"] != "off" and self.p["grid_snap_output"] and self.snapped is not None:
+            return self.snapped
+        return self.classes()
 
     def _moving_tof(self, t, raw_m):
         p = self.p
@@ -546,7 +742,8 @@ class Explorer:
 
     # ---- planning / driving -------------------------------------------------------------------------------------
     def classes(self):
-        return self.grid.classify(self.p["occ_prob"], self.p["free_prob"], self.p["clean_isolated"])
+        return self.grid.classify(self.p["occ_prob"], self.p["free_prob"], self.p["clean_isolated"],
+                                  self.p["min_wall_blob_cells"])
 
     def plan_frontier(self):
         pose = self.pose()
@@ -651,12 +848,26 @@ class Explorer:
     # ---- metrics / outputs ---------------------------------------------------------------------------------
     def update_metrics(self):
         with self.lock:
-            classes = self.classes()
+            classes = self.output_classes()
+            raw = self.classes() if classes is self.snapped else None
             grid = self.grid
             border = border_mask(grid, self.p) if self.p["border_enabled"] else None
             gt = self.gt
         try:
             m = evaluate(classes, grid, self.p, gt, border)
+            m["map"] = "grid" if raw is not None else "raw"
+            if raw is not None:
+                r = evaluate(raw, grid, self.p, gt, border)
+                r.pop("_images", None)
+                m["raw"] = {k: r[k] for k in ("accuracy_pct", "coverage_pct", "strict_accuracy_pct") if k in r}
+            if self.grid_model is not None:
+                m["grid"] = self.grid_model.as_dict()
+                if self.grid_edges is not None:
+                    e = self.grid_edges
+                    m["grid"].update(
+                        walls=int((e.vert == gm.EDGE_WALL).sum() + (e.horz == gm.EDGE_WALL).sum()),
+                        open=int((e.vert == gm.EDGE_OPEN).sum() + (e.horz == gm.EDGE_OPEN).sum()),
+                        cells_seen=int((e.cell_free >= self.p["grid_cell_seen_frac"]).sum()))
         except Exception as exc:
             self.log(f"Scoring failed: {exc!r}", "error")
             return
@@ -705,22 +916,49 @@ class Explorer:
         d = self.run_dir
         with self.lock:
             classes = self.classes()
+            out_classes = self.output_classes()
             grid = self.grid
             traj = list(self.traj)
             prob = grid.probability()
             images = getattr(self, "_eval_images", None)
+            model, edges = self.grid_model, self.grid_edges
+        if self.p["grid_mode"] != "off" and self.wall_pts and (model is None or not model.cell_trusted):
+            # not confirmed during the run: best fit over all the data, for the saved maps
+            pts = np.concatenate([a for a, _ in self.wall_pts])
+            ang = np.concatenate([b for _, b in self.wall_pts])
+            final = gm.detect(pts, ang, self.p, model, final=True)
+            if final is not None and final.cell_trusted:
+                with self.lock:
+                    model, edges = final, gm.classify_edges(final, grid, classes, self.p)
+                    self.snapped = gm.render(model, edges, grid, self.p)
+                    self.grid_model, self.grid_edges = model, edges
+                    self.grid_version += 1
+                    out_classes = self.output_classes()
+                self.log(f"Grid (fit over the whole run): cell {model.cell:.3f} m, angle "
+                         f"{math.degrees(model.theta):+.1f} deg")
         if report is None:
             report = self.build_report("saved by operator", self.pose())
         walls = gt_walls_world(self.gt, self.p) if self.gt else None
         end = (traj[-1][1], traj[-1][2], traj[-1][3]) if traj else self.pose()
-        img = render_map(grid, classes, self.p, [(x, y) for _, x, y, _ in traj], self.start_pose, end)
-        cv2.imwrite(os.path.join(d, "map.png"), img)
+        xy = [(x, y) for _, x, y, _ in traj]
+        cv2.imwrite(os.path.join(d, "map.png"), render_map(grid, out_classes, self.p, xy, self.start_pose, end))
+        if out_classes is not classes:
+            cv2.imwrite(os.path.join(d, "map_raw.png"), render_map(grid, classes, self.p, xy, self.start_pose, end))
         if walls:
             cv2.imwrite(os.path.join(d, "map_with_ground_truth.png"),
-                        render_map(grid, classes, self.p, [(x, y) for _, x, y, _ in traj], self.start_pose, end, walls))
+                        render_map(grid, out_classes, self.p, xy, self.start_pose, end, walls))
+        if model is not None and edges is not None:
+            cv2.imwrite(os.path.join(d, "map_grid.png"),
+                        gm.render_grid_image(model, edges, self.p, xy, self.start_pose, end))
+            with open(os.path.join(d, "grid_model.json"), "w", encoding="utf-8") as f:
+                json.dump({**model.as_dict(), "cells_i": [edges.i0, edges.i1], "cells_j": [edges.j0, edges.j1],
+                           "edge_states": "0 unknown, 1 open, 2 wall",
+                           "vertical_edges": edges.vert.tolist(), "horizontal_edges": edges.horz.tolist(),
+                           "wall_segments_m": [list(map(lambda v: round(v, 4), sgm[:4]))
+                                               for sgm in edges.segments(model, gm.EDGE_WALL)]}, f, indent=1)
         if images is not None:
             cv2.imwrite(os.path.join(d, "comparison.png"), comparison_image(images))
-        write_grid_csv(os.path.join(d, "map_grid.csv"), classes, grid)
+        write_grid_csv(os.path.join(d, "map_cells.csv"), out_classes, grid)
         np.save(os.path.join(d, "map_prob.npy"), prob)
         with open(os.path.join(d, "map_meta.json"), "w", encoding="utf-8") as f:
             json.dump({"resolution_m": grid.res, "origin_x_m": grid.origin_x, "origin_y_m": grid.origin_y,
@@ -780,6 +1018,16 @@ class Explorer:
             if gt_version != self.gt_version:
                 out["gt"] = None if self.gt is None else {"name": self.gt["name"],
                                                           "walls": gt_walls_world(self.gt, self.p), "raw": self.gt}
+        with self.lock:
+            model, edges = self.grid_model, self.grid_edges
+            out["grid_version"] = self.grid_version
+            if model is not None:
+                g = model.as_dict()
+                if edges is not None:
+                    g["walls"] = [[round(v, 3) for v in sg[:4]] for sg in edges.segments(model, gm.EDGE_WALL)]
+                    g["unknown"] = [[round(v, 3) for v in sg[:4]] for sg in edges.segments(model, gm.EDGE_UNKNOWN)
+                                    if self._edge_near_seen(sg)]
+                out["grid"] = g
         if param_version != self.param_version:
             out["params"] = dict(self.p)
         if self.last_report:

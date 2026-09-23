@@ -129,12 +129,43 @@ zoom, drag = pan. Number boxes apply on Enter.
 | Ground truth | Load (file path) / draw / save the arena map as JSON and set where the robot starts in it. |
 | Results | The run folder's files (click to open) and the latest saved map. |
 
+### Auto grid (maze arenas)
+
+The arena is treated as a maze whose walls lie on a square grid
+(`grid_mode`, Settings > Grid):
+
+- **Finding the grid** – the grid angle comes from the directions of the walls
+  (they meet at 90°); the cell size and offset are the ones that put the most
+  wall points on grid lines. The angle locks once three detections agree; the
+  cell size only locks after three confident, agreeing detections, so a noisy
+  start never locks a wrong grid. If you know your tile size, set
+  `grid_mode: fixed` and `grid_cell_m` and it locks at once.
+- **Straight maps** – each scan is snapped to the locked grid (heading, then
+  position), and every grid edge is voted *wall / open / unknown*. A wall seen
+  along part of an edge becomes the whole edge (gaps filled); blobs off the grid
+  lines disappear. The Clean layer shows this map; Maze draws the voted walls
+  (unknown edges dashed).
+- **Moving grid to grid** – once the grid is locked the robot drives cell centre
+  to cell centre along the grid axes: it turns to the axis, strafes back onto
+  the cell's centre line (mecanum wheels) and drives exactly to the next centre,
+  only through open edges. It targets the nearest cell that is unseen or still
+  has an unknown wall, scans there, and finishes when none is left. Before the
+  grid is locked it explores freely.
+
+Rebuild a recorded run with the current settings (no robot needed), e.g. to try
+another cell size:
+
+```bash
+python3 analysis/replay_slam.py data/slam/run_20260923_103629 --set grid_mode=fixed grid_cell_m=0.63
+```
+
 ### What gets saved (`data/slam/run_<date>_<time>/`)
 
 | File | Content |
 | --- | --- |
-| `map.png`, `map_with_ground_truth.png` | The map with trajectory, start (green) and end (red) |
-| `map_grid.csv`, `map_prob.npy`, `map_meta.json` | The grid itself (0 unknown, 1 free, 2 wall) |
+| `map.png`, `map_with_ground_truth.png` | The map (clean grid map when a grid was found) with trajectory, start (green) and end (red); `map_raw.png` before clean-up |
+| `map_grid.png`, `grid_model.json` | The maze drawn straight on its grid, and every cell edge (wall / open / unknown) |
+| `map_cells.csv`, `map_prob.npy`, `map_meta.json` | The map cells (0 unknown, 1 free, 2 wall) and probabilities |
 | `trajectory.csv`, `log_pose.csv` | Robot trajectory (SLAM pose and odometry at 10 Hz) |
 | `log_events.csv`, `log_scans_raw.csv`, `log_scans_filtered.csv` | Exploration log, every raw ToF reading, every filtered beam |
 | `comparison.png` | Ground-truth check: white/black correct, red missed wall, orange false wall, grey unexplored |
@@ -166,9 +197,10 @@ Then enter the robot's start pose in that frame (Ground truth tab, or
    the moment it was measured (latency-compensated).
 2. **Noise reduction** – range gate, per-angle median with MAD outlier
    rejection, removal of spikes and dropouts that disagree with both
-   neighbours, readings that pass through a wall the map is already sure of are
-   dropped, then log-odds fusion averages many scans, and single-cell specks
-   are hidden.
+   neighbours, lone points with no neighbouring wall point (the ToF's wide beam
+   makes them at wall ends), readings that pass through a wall the map is
+   already sure of are dropped, then log-odds fusion averages many scans, small
+   wall blobs are hidden, and the auto grid snaps walls onto grid lines.
 3. **Mapping** – a log-odds occupancy grid: cells along each beam become more
    *free*, the cell where it ends more *occupied*; the wedge between
    neighbouring beams is cleared too so no gaps are left.

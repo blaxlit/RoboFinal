@@ -26,7 +26,7 @@ from .scan import bin_samples
 
 def profile(samples, params, step_deg=1.0):
     """Range per whole degree (NaN where no wall), robot frame."""
-    p = dict(params, scan_step_deg=step_deg, no_hit_free_m=0.0, tof_offset_m=0.0)
+    p = dict(params, scan_step_deg=step_deg, no_hit_free_m=0.0, tof_offset_m=0.0, isolated_join_m=0.0)
     angles, ranges, hits = bin_samples(samples, p)
     grid = np.arange(-180, 180, step_deg)
     out = np.full(grid.shape, np.nan)

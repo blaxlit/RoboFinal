@@ -90,6 +90,14 @@ class FilterTest(unittest.TestCase):
         self.assertTrue(np.allclose(ranges, 1.0))
         self.assertNotIn(round(math.radians(10), 4), [round(v, 4) for v in angles])
 
+    def test_lone_point_is_removed(self):
+        p = base_params(scan_step_deg=2.0, tof_offset_m=0.0)
+        samples = [(math.radians(d), 1.0) for d in range(-20, 22, 2)]
+        samples += [(math.radians(60), 0.7)]  # a stray point on its own
+        angles, ranges, hits = bin_samples(samples, p)
+        self.assertNotIn(60, [round(math.degrees(a)) for a in angles])
+        self.assertEqual(len(angles), 21)
+
     def test_dropout_between_walls_is_removed(self):
         p = base_params(scan_step_deg=2.0, tof_offset_m=0.0)
         samples = [(math.radians(d), 0.5) for d in range(-10, 12, 2)]
@@ -137,6 +145,75 @@ class PlannerTest(unittest.TestCase):
         self.assertIsNotNone(info["goal"])
         gx, gy = g.cell_to_world(*info["goal"])
         self.assertGreater(gx, 0.8)
+
+
+class GridModelTest(unittest.TestCase):
+    def maze_points(self, theta_deg=-5.5, cell=0.63, offset=(0.2, 0.25)):
+        """Oriented wall points of a 5x4-cell maze, rotated and shifted."""
+        from slam import gridmodel as G
+        segs = [(0, 0, 5, 0), (5, 0, 5, 4), (5, 4, 0, 4), (0, 4, 0, 0), (1, 0, 1, 2), (2, 1, 3, 1), (3, 1, 3, 3),
+                (4, 2, 4, 4), (1, 3, 2, 3)]
+        th = math.radians(theta_deg)
+        pts, ang = [], []
+        rng = np.random.default_rng(0)
+        for x1, y1, x2, y2 in segs:
+            n = int(math.hypot(x2 - x1, y2 - y1) * cell / 0.02)
+            t = np.linspace(0.05, 0.95, n)
+            u = (x1 + (x2 - x1) * t) * cell + offset[0] + rng.normal(0, 0.008, n)
+            v = (y1 + (y2 - y1) * t) * cell + offset[1] + rng.normal(0, 0.008, n)
+            xs, ys = math.cos(th) * u - math.sin(th) * v, math.sin(th) * u + math.cos(th) * v
+            p, a = G.oriented_points(xs, ys)
+            pts.append(p)
+            ang.append(a)
+        return np.concatenate(pts), np.concatenate(ang)
+
+    def test_detects_angle_cell_and_offset(self):
+        from slam import gridmodel as G
+        pts, ang = self.maze_points()
+        history, m = [], None
+        for frac in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0):  # walls seen bit by bit, as during a mission
+            n = int(len(pts) * frac)
+            m = G.detect(pts[:n], ang[:n], base_params(), m, history)
+            history.append(m)
+        self.assertTrue(m.cell_trusted)
+        self.assertAlmostEqual(m.cell, 0.63, delta=0.01)
+        self.assertAlmostEqual(math.degrees(m.theta), -5.5, delta=0.5)
+        self.assertAlmostEqual(m.ou % m.cell, 0.2, delta=0.02)
+
+    def test_snap_pose_removes_small_heading_and_shift(self):
+        from slam import gridmodel as G
+        pts, ang = self.maze_points(theta_deg=0.0, offset=(0.0, 0.0))
+        m = G.GridModel(0.0, 0.63, 0.0, 0.0, 1.0, len(pts), True)
+        # the same walls seen from a pose that is 3 deg and 4 cm off
+        th = math.radians(3)
+        c, s = math.cos(th), math.sin(th)
+        moved = np.stack([c * pts[:, 0] - s * pts[:, 1] + 0.04, s * pts[:, 0] + c * pts[:, 1]], axis=1)
+        dx, dy, dth = G.snap_pose(m, (0.04, 0.0, th), moved, ang + th)
+        self.assertAlmostEqual(math.degrees(dth), -3.0, delta=0.5)
+        self.assertLess(abs(0.04 + dx), 0.02)
+
+    def test_edges_fill_gaps_and_drop_blobs(self):
+        from slam import gridmodel as G
+        p = base_params()
+        g = make_grid(p)
+        cls = np.full((g.rows, g.cols), UNKNOWN, np.uint8)
+        # one 0.6 m cell seen free, walls on three sides, the right wall only half seen
+        r0, c0 = g.world_to_cell(0.0, 0.0)
+        n = 12
+        cls[r0:r0 + n, c0:c0 + n] = FREE
+        cls[r0 - 1, c0:c0 + n] = OCCUPIED
+        cls[r0 + n, c0:c0 + n] = OCCUPIED
+        cls[r0:r0 + n, c0 - 1] = OCCUPIED
+        cls[r0:r0 + n // 2, c0 + n] = OCCUPIED
+        cls[r0 + 5, c0 + 5] = OCCUPIED  # a blob in the middle
+        model = G.GridModel(0.0, 0.6, -0.025, -0.025, 1.0, 500, True)
+        e = G.classify_edges(model, g, cls, p)
+        a, b = 0 - e.i0, 0 - e.j0
+        self.assertEqual(e.vert[a, b], G.EDGE_WALL)          # left
+        self.assertEqual(e.vert[a + 1, b], G.EDGE_WALL)      # right, half seen -> filled
+        self.assertEqual(e.horz[a, b], G.EDGE_WALL)          # bottom
+        out = G.render(model, e, g, p)
+        self.assertEqual(out[r0 + 5, c0 + 5], FREE)          # blob gone
 
 
 class MatcherTest(unittest.TestCase):
@@ -195,7 +272,7 @@ class MissionTest(unittest.TestCase):
                 time.sleep(0.2)
             self.assertEqual(ex.state, "DONE")
             for name in ("map.png", "trajectory.csv", "report.json", "report.md", "comparison.png",
-                         "log_events.csv", "log_scans_raw.csv", "map_grid.csv"):
+                         "log_events.csv", "log_scans_raw.csv", "map_cells.csv"):
                 self.assertTrue(os.path.exists(os.path.join(ex.run_dir, name)), name)
             with open(os.path.join(ex.run_dir, "report.json")) as f:
                 rep = json.load(f)

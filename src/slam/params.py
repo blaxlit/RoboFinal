@@ -35,7 +35,8 @@ PARAMS = {
     "l_clamp": (4.0, "float", 1.0, 10.0, 0.5, "Map", "Log-odds limit (lower = map changes faster).", False),
     "occ_prob": (0.65, "float", 0.5, 0.95, 0.01, "Map", "Probability above which a cell is a wall.", False),
     "free_prob": (0.40, "float", 0.05, 0.5, 0.01, "Map", "Probability below which a cell is free.", False),
-    "clean_isolated": (True, "bool", None, None, None, "Map", "Hide single wall cells with no wall neighbours (noise).", False),
+    "clean_isolated": (True, "bool", None, None, None, "Map", "Hide small wall specks (noise), see min_wall_blob_cells.", False),
+    "min_wall_blob_cells": (3, "int", 1, 50, 1, "Map", "Wall blobs smaller than this many cells are hidden as noise.", False),
 
     # ---- scanning ------------------------------------------------------------
     "scan_mode": ("sweep", ["sweep", "step"], None, None, None, "Scan",
@@ -43,7 +44,7 @@ PARAMS = {
     "scan_start_deg": (-180.0, "float", -250.0, 0.0, 5.0, "Scan", "Gimbal scan start (deg from chassis front).", False),
     "scan_end_deg": (180.0, "float", 0.0, 250.0, 5.0, "Scan", "Gimbal scan end (deg).", False),
     "scan_speed_dps": (45.0, "float", 5.0, 300.0, 5.0, "Scan", "Gimbal speed during a sweep (deg/s).", False),
-    "scan_step_deg": (3.0, "float", 0.5, 15.0, 0.5, "Scan", "Angle between beams (sweep bin width / step size).", False),
+    "scan_step_deg": (2.0, "float", 0.5, 15.0, 0.5, "Scan", "Angle between beams (sweep bin width / step size).", False),
     "samples_per_step": (4, "int", 1, 20, 1, "Scan", "ToF readings averaged at each step (step mode).", False),
     "settle_s": (0.12, "float", 0.0, 1.0, 0.02, "Scan", "Wait after each gimbal step before reading (s).", False),
     "scan_pitch_deg": (0.0, "float", -20.0, 25.0, 1.0, "Scan", "Gimbal pitch while scanning.", False),
@@ -64,6 +65,7 @@ PARAMS = {
     "outlier_abs_m": (0.05, "float", 0.005, 0.5, 0.005, "Noise", "Always keep readings within this of the median (m).", False),
     "spike_tol_m": (0.25, "float", 0.02, 2.0, 0.01, "Noise", "Drop a beam that differs from both agreeing neighbours by more.", False),
     "min_bin_samples": (1, "int", 1, 10, 1, "Noise", "Beams with fewer good readings are dropped.", False),
+    "isolated_join_m": (0.08, "float", 0.0, 0.5, 0.01, "Noise", "Drop a wall point with no neighbouring point this close (0 = off).", False),
 
     # ---- localisation ----------------------------------------------------------
     "scan_matching": (True, "bool", None, None, None, "Localisation", "Correct odometry drift by matching each scan to the map.", False),
@@ -98,6 +100,24 @@ PARAMS = {
     "return_home": (False, "bool", None, None, None, "Explore", "Drive back to the start when exploration ends.", False),
     "auto_calibrate": (True, "bool", None, None, None, "Explore", "Run auto calibration when a mission starts.", False),
     "calibrate_with_motion": (True, "bool", None, None, None, "Explore", "Calibration may turn and drive the robot a little.", False),
+
+    # ---- auto grid (maze on a square lattice) ---------------------------------------
+    "grid_mode": ("auto", ["auto", "fixed", "off"], None, None, None, "Grid",
+                  "auto = find the maze grid (angle, cell size, offset); fixed = use grid_cell_m; off = free-form map.", False),
+    "grid_cell_m": (0.6, "float", 0.2, 2.0, 0.005, "Grid", "Cell size for fixed mode (auto mode shows what it found).", False),
+    "grid_min_cell_m": (0.3, "float", 0.15, 2.0, 0.05, "Grid", "Smallest cell size auto mode tries.", False),
+    "grid_max_cell_m": (1.2, "float", 0.2, 3.0, 0.05, "Grid", "Largest cell size auto mode tries.", False),
+    "grid_snap_pose": (True, "bool", None, None, None, "Grid", "Correct heading and position so walls sit on the grid.", False),
+    "grid_snap_output": (True, "bool", None, None, None, "Grid", "Saved map and scores use the clean grid map.", False),
+    "grid_wall_frac": (0.3, "float", 0.05, 1.0, 0.05, "Grid", "Part of an edge that must look like wall to make it a wall.", False),
+    "grid_open_frac": (0.5, "float", 0.05, 1.0, 0.05, "Grid", "Part of an edge that must be seen free to make it open.", False),
+    "grid_cell_seen_frac": (0.3, "float", 0.05, 1.0, 0.05, "Grid", "Part of a cell that must be seen free to show it as explored.", False),
+    "grid_wall_thickness_m": (0.05, "float", 0.01, 0.3, 0.01, "Grid", "Wall thickness drawn in the grid map.", False),
+    "grid_drive": (True, "bool", None, None, None, "Grid", "Move cell to cell along the grid (centred) once the grid is found.", False),
+    "grid_stop_each_cell": (True, "bool", None, None, None, "Grid", "Stop and re-centre in every cell (off = drive straight runs).", False),
+    "grid_scan_each_cell": (False, "bool", None, None, None, "Grid", "Scan in every cell passed, not only at each target.", False),
+    "grid_center_tol_m": (0.03, "float", 0.005, 0.2, 0.005, "Grid", "Strafe back to the cell's centre line when further off than this.", False),
+    "grid_align_view": (True, "bool", None, None, None, "Grid", "Rotate the view and saved images so the grid is straight.", False),
 
     # ---- evaluation ------------------------------------------------------------------
     "eval_resolution_m": (0.05, "float", 0.02, 1.0, 0.01, "Evaluate", "Cell size used for accuracy / coverage.", False),

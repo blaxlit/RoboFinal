@@ -59,7 +59,32 @@ def bin_samples(samples, params):
         ranges.append(correct_range(float(np.median(values[keep])), params))
         hits.append(True)
     angles, ranges, hits = np.asarray(angles), np.asarray(ranges), np.asarray(hits, bool)
-    return remove_spikes(angles, ranges, hits, params["spike_tol_m"], step)
+    angles, ranges, hits = remove_spikes(angles, ranges, hits, params["spike_tol_m"], step)
+    return remove_isolated_hits(angles, ranges, hits, params.get("isolated_join_m", 0.0), step)
+
+
+def remove_isolated_hits(angles, ranges, hits, join, step):
+    """Drop wall points with no other wall point nearby among the two beams on
+    each side. The ToF's wide beam makes such lone points at wall ends and
+    corners; real walls always give runs of neighbouring points."""
+    n = len(angles)
+    if join <= 0 or n < 3:
+        return angles, ranges, hits
+    x, y = ranges * np.cos(angles), ranges * np.sin(angles)
+    keep = np.ones(n, bool)
+    for i in range(n):
+        if not hits[i]:
+            continue
+        limit = join + ranges[i] * step * 1.5
+        ok = False
+        for d in (-2, -1, 1, 2):
+            j = (i + d) % n
+            if j != i and hits[j] and abs(_wrap(angles[j] - angles[i])) < 2.6 * step and \
+                    math.hypot(x[j] - x[i], y[j] - y[i]) < limit * abs(d):
+                ok = True
+                break
+        keep[i] = ok
+    return angles[keep], ranges[keep], hits[keep]
 
 
 def remove_spikes(angles, ranges, hits, tol, step):
