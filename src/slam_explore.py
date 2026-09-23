@@ -1,12 +1,13 @@
 """Class Work 8: SLAM - explore an unknown area with the RoboMaster EP.
 
-    python src/slam_explore.py --sim                 # simulator, opens the console
+    python src/slam_explore.py --sim                 # simulator, opens the console window
     python src/slam_explore.py                       # real robot (Wi-Fi AP mode)
     python src/slam_explore.py --gt data/slam/ground_truth_example.json
     python src/slam_explore.py --sim --auto --headless   # run a mission and exit
 
-The console (http://localhost:8765) shows the live map, pose, sensor data and
-logs, and has every setting and command. Results land in data/slam/run_*/.
+The console window (pygame) shows the live map, pose, sensor data and logs,
+and has every setting and command; --web serves the same console in a browser
+at http://localhost:8765 instead. Results land in data/slam/run_*/.
 """
 
 import argparse
@@ -22,6 +23,8 @@ VENV_PYTHON = os.path.join(BASE_DIR, ".venv", "bin", "python")
 
 try:
     import cv2, numpy, yaml  # noqa: E401,F401
+    if "--headless" not in sys.argv and "--web" not in sys.argv:
+        import pygame  # noqa: F401
 except ImportError as exc:
     # Started with a Python that lacks the packages (e.g. the system python3):
     # rerun with the project's virtual environment if there is one.
@@ -37,13 +40,14 @@ EXAMPLE_GT = os.path.join(BASE_DIR, "data", "slam", "ground_truth_example.json")
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="RoboMaster SLAM explorer with a live web console.")
+    ap = argparse.ArgumentParser(description="RoboMaster SLAM explorer with a live console.")
     ap.add_argument("--sim", action="store_true", help="use the simulator instead of the robot")
     ap.add_argument("--connection", default="ap", choices=["ap", "sta", "rndis"], help="robot connection type")
     ap.add_argument("--gt", help="ground-truth map JSON for accuracy (the simulator uses it as its world)")
-    ap.add_argument("--port", type=int, default=8765, help="console port")
-    ap.add_argument("--host", default="127.0.0.1", help="console address (0.0.0.0 to open it from a phone)")
-    ap.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    ap.add_argument("--web", action="store_true", help="browser console instead of the pygame window")
+    ap.add_argument("--port", type=int, default=8765, help="web console port")
+    ap.add_argument("--host", default="127.0.0.1", help="web console address (0.0.0.0 to open it from a phone)")
+    ap.add_argument("--no-browser", action="store_true", help="with --web: do not open the browser")
     ap.add_argument("--headless", action="store_true", help="no console; use with --auto")
     ap.add_argument("--auto", action="store_true", help="start the mission immediately")
     ap.add_argument("--time-scale", type=float, default=4.0, help="simulator speed-up")
@@ -80,14 +84,18 @@ def main(argv=None):
     explorer = Explorer(io, params, args.out, gt)
     server = None
     try:
-        if not args.headless:
+        if args.auto:
+            explorer.command("start")
+        if not args.headless and not args.web:
+            from slam.ui_pygame import run_console
+            run_console(explorer, os.path.join(BASE_DIR, "data", "slam"))  # returns when the window closes
+            return 0
+        if args.web:
             from slam.console import serve
             server, url = serve(explorer, args.host, args.port)
             print(f"SLAM console: {url}  (Ctrl+C to quit)")
             if not args.no_browser:
                 webbrowser.open(url)
-        if args.auto:
-            explorer.command("start")
         while True:
             time.sleep(0.5)
             if args.headless and args.auto and explorer.state == "DONE" and explorer.cmd_q.empty():

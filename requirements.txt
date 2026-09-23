@@ -1,5 +1,6 @@
 numpy<2
 opencv-python>=4.5
 PyYAML>=6.0
+pygame>=2.5       # SLAM console window (src/slam_explore.py)
 robomaster>=0.1.1.68
 pynput>=1.7  # optional: multi-key WASD control (falls back to OpenCV keys)

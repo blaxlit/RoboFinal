@@ -218,5 +218,41 @@ class MissionTest(unittest.TestCase):
             shutil.rmtree(out, ignore_errors=True)
 
 
+class PygameConsoleTest(unittest.TestCase):
+    def test_every_tab_renders(self):
+        try:
+            import pygame
+        except ImportError:
+            self.skipTest("pygame not installed")
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        from slam.explorer import Explorer
+        from slam.ui_pygame import TABS, Console
+        out = tempfile.mkdtemp()
+        gt = load_ground_truth(GT_PATH)
+        p = base_params(auto_calibrate=False)
+        io = SimRobotIO(gt, start=(p["gt_start_x"], p["gt_start_y"], 0.0), time_scale=60)
+        ex = Explorer(io, p, out, gt, log_print=False)
+        try:
+            ex.command("scan")
+            end = time.time() + 30
+            while ex.stats["scans"] == 0 and time.time() < end:
+                time.sleep(0.1)
+            con = Console(ex, out)
+            for theme in ("dark", "light"):
+                con.ui.set_theme(theme)
+                for tab in TABS:
+                    con.tab = tab
+                    con.ui.begin(con.screen, [])
+                    con.poll()
+                    con.draw([])
+            self.assertIsNotNone(con.map)
+            self.assertGreater(len(con.events), 0)
+        finally:
+            pygame.quit()
+            ex.shutdown()
+            io.close()
+            shutil.rmtree(out, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

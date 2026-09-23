@@ -108,22 +108,26 @@ everything while it runs.
 .venv/bin/python src/slam_explore.py --gt data/slam/ground_truth_example.json   # robot + ground truth for scoring
 ```
 
-The console opens at <http://localhost:8765>. Press **Start mission**; the
-robot calibrates, then repeats *scan → localise → update map → pick frontier →
+A console window (pygame) opens. Press **Start mission**; the robot
+calibrates, then repeats *scan → localise → update map → pick frontier →
 drive* until nothing is left to explore. **STOP** (or Space) halts all motion,
 **Pause** freezes the mission, **Finish & report** ends it and writes the
-report. Use `--host 0.0.0.0` to open the console from a phone or another laptop
-on the same network.
+report. Add `--web` to get the same console in a browser at
+<http://localhost:8765> instead (`--host 0.0.0.0` to open it from a phone).
+
+Window keys: Space = STOP, W/A/S/D = drive/strafe, Q/E = rotate (while no text
+box is being edited), F = fit map, R = follow robot, +/- = zoom, mouse wheel =
+zoom, drag = pan. Number boxes apply on Enter.
 
 | Console part | What it does |
 | --- | --- |
-| Map | Live occupancy grid, trajectory, last scan, frontiers, planned path, ground truth. Zoom (wheel), pan (drag), rotate the view (buttons / slider, also rotates saved images), follow robot. |
+| Map | Live occupancy grid, trajectory, last scan, frontiers, planned path, ground truth. Zoom (wheel), pan (drag), rotate the view (Rotate L/R, also rotates saved images), follow robot, layer toggles. |
 | Map modes | **Go to** (click a target) · **Set pose** (drag to fix the robot's pose) · **Border** (drag the area to explore and score) · **GT wall** / **GT arena** (draw the ground truth). |
 | Status | Map Accuracy and Coverage, SLAM pose vs odometry vs drift correction, start pose, pose in the arena frame, ToF, gimbal, mission stats, report (start / end), charts of ToF, coverage, accuracy, speed and drift correction over the whole run, polar plot of the last scan. |
 | Control | WASD/QE manual drive with speed sliders, rotate robot by ±45/90/180 or any angle, move, go to x/y, go home, scan now, auto calibrate, aim gimbal, ToF wall calibration, set / rotate the pose estimate, clear map, new session. |
 | Settings | Every setting (map size and resolution, border, scan range/speed/mode, noise filters, localisation, speeds, safety distances, exploration limits, scoring) with ranges and help. Changes apply at once; **Save settings** writes `config/slam_settings.yaml`. |
-| Ground truth | Load / draw / download the arena map and set where the robot starts in it. |
-| Results | The run folder's files and the latest map images. |
+| Ground truth | Load (file path) / draw / save the arena map as JSON and set where the robot starts in it. |
+| Results | The run folder's files (click to open) and the latest saved map. |
 
 ### What gets saved (`data/slam/run_<date>_<time>/`)
 
