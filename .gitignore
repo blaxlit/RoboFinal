@@ -3,3 +3,4 @@
 /data/captures/
 
 /data/slam/run_*/
+/config/slam_calibration_*.yaml

@@ -10,6 +10,8 @@
 5. Odometry y  - turn 90 deg, drive 0.2 m and back: the reported movement must
                  point the way the robot faces.
 Steps 3-5 move the robot, so they only run with calibrate_with_motion on.
+The results are saved per robot (config/slam_calibration_<robot>.yaml) and
+reused by later missions (setting calibration: saved).
 
 The whole map could still be a mirror image if every sign were flipped; that
 one choice is gimbal_yaw_sign (default: positive gimbal yaw turns right, as

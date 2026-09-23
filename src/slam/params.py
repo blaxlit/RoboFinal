@@ -95,10 +95,11 @@ PARAMS = {
     "min_goal_m": (0.25, "float", 0.0, 2.0, 0.05, "Explore", "Frontiers closer than this after a full scan are ignored.", False),
     "gain_weight": (0.02, "float", 0.0, 1.0, 0.005, "Explore", "Prefer bigger frontiers (higher) or closer ones (lower).", False),
     "coverage_goal_pct": (98.0, "float", 10.0, 100.0, 1.0, "Explore", "Stop when border coverage reaches this (border on).", False),
-    "max_iterations": (60, "int", 1, 500, 1, "Explore", "Maximum scan-and-move cycles.", False),
-    "max_time_s": (900.0, "float", 30.0, 7200.0, 30.0, "Explore", "Maximum mission time (s).", False),
+    "max_iterations": (300, "int", 1, 2000, 1, "Explore", "Maximum scan-and-move cycles.", False),
+    "max_time_s": (2400.0, "float", 30.0, 7200.0, 30.0, "Explore", "Maximum mission time (s).", False),
     "return_home": (False, "bool", None, None, None, "Explore", "Drive back to the start when exploration ends.", False),
-    "auto_calibrate": (True, "bool", None, None, None, "Explore", "Run auto calibration when a mission starts.", False),
+    "calibration": ("saved", ["saved", "always", "off"], None, None, None, "Explore",
+                    "saved = use the stored calibration (calibrate once if there is none); always = every mission.", False),
     "calibrate_with_motion": (True, "bool", None, None, None, "Explore", "Calibration may turn and drive the robot a little.", False),
 
     # ---- auto grid (maze on a square lattice) ---------------------------------------
@@ -113,10 +114,8 @@ PARAMS = {
     "grid_open_frac": (0.5, "float", 0.05, 1.0, 0.05, "Grid", "Part of an edge that must be seen free to make it open.", False),
     "grid_cell_seen_frac": (0.3, "float", 0.05, 1.0, 0.05, "Grid", "Part of a cell that must be seen free to show it as explored.", False),
     "grid_wall_thickness_m": (0.05, "float", 0.01, 0.3, 0.01, "Grid", "Wall thickness drawn in the grid map.", False),
-    "grid_drive": (True, "bool", None, None, None, "Grid", "Move cell to cell along the grid (centred) once the grid is found.", False),
-    "grid_stop_each_cell": (True, "bool", None, None, None, "Grid", "Stop and re-centre in every cell (off = drive straight runs).", False),
-    "grid_cells_per_step": (1, "int", 1, 10, 1, "Grid", "Cells driven between scans (1 = move one cell, scan, repeat).", False),
-    "grid_scan_each_cell": (False, "bool", None, None, None, "Grid", "Also scan in cells passed during a multi-cell step.", False),
+    "grid_drive": (True, "bool", None, None, None, "Grid", "Move one cell at a time and scan in every cell once the grid is found.", False),
+    "grid_start_centered": (True, "bool", None, None, None, "Grid", "The robot starts in the middle of a cell (fixes where the grid lines are).", False),
     "grid_center_tol_m": (0.03, "float", 0.005, 0.2, 0.005, "Grid", "Strafe back to the cell's centre line when further off than this.", False),
     "grid_align_view": (True, "bool", None, None, None, "Grid", "Rotate the view and saved images so the grid is straight.", False),
 
@@ -127,6 +126,40 @@ PARAMS = {
     "gt_start_y": (0.3, "float", -30.0, 30.0, 0.05, "Evaluate", "Robot start y in the ground-truth map (m).", False),
     "gt_start_deg": (0.0, "float", -180.0, 180.0, 1.0, "Evaluate", "Robot start heading in the ground-truth map (deg).", False),
 }
+
+
+# the settings shown when "all settings" is off in the console
+ESSENTIAL = [
+    "grid_mode", "grid_cell_m", "grid_start_centered", "linear_speed_mps", "angular_speed_dps", "scan_mode",
+    "scan_speed_dps", "tof_max_m", "stop_distance_m", "robot_radius_m", "calibration", "return_home",
+    "max_time_s", "border_enabled", "border_min_x", "border_min_y", "border_max_x", "border_max_y",
+    "gimbal_yaw_sign",
+]
+
+# values found by auto calibration, stored per robot so they are not measured every run
+CALIBRATION_KEYS = ["chassis_yaw_sign", "cmd_z_sign", "odom_y_sign", "tof_latency_s", "yaw_drift_dps",
+                    "outlier_abs_m", "tof_bias_m", "tof_scale"]
+
+
+def calibration_path(robot_name):
+    return os.path.join(BASE_DIR, "config", f"slam_calibration_{robot_name}.yaml")
+
+
+def load_calibration(robot_name):
+    """Stored calibration values (dict, empty if none)."""
+    data = _read_yaml(calibration_path(robot_name))
+    return {k: coerce(k, v) for k, v in (data.get("values") or {}).items() if k in CALIBRATION_KEYS}
+
+
+def save_calibration(robot_name, values, details=None):
+    from datetime import datetime
+    path = calibration_path(robot_name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Written by SLAM auto calibration. Delete this file (or run Auto calibrate) to measure again.\n")
+        yaml.safe_dump({"saved_at": datetime.now().isoformat(timespec="seconds"),
+                        "values": {k: values[k] for k in CALIBRATION_KEYS},
+                        "measurements": details or {}}, f, sort_keys=False, allow_unicode=True)
+    return path
 
 
 def defaults():

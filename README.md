@@ -99,62 +99,60 @@ then adjust `pitch_compensation` until the shots land on the target.
 
 `src/slam_explore.py` explores an area with no map, builds the map from the
 ToF sensor on top of the gimbal, estimates the robot's own position, and
-reports where the robot started and ended. A live console in the browser shows
-everything while it runs.
+reports where the robot started and ended. A console window shows everything
+while it runs.
 
 ```bash
-.venv/bin/python src/slam_explore.py --sim        # try it first with the built-in simulator
-.venv/bin/python src/slam_explore.py              # real robot (Wi-Fi AP mode)
-.venv/bin/python src/slam_explore.py --gt data/slam/ground_truth_example.json   # robot + ground truth for scoring
+python3 src/slam_explore.py --sim                                   # simulator
+python3 src/slam_explore.py --set grid_mode=fixed grid_cell_m=0.63  # robot, maze with 0.63 m tiles
 ```
 
-A console window (pygame) opens. Press **Start mission**; the robot
-calibrates, then repeats *scan → localise → update map → pick frontier →
-drive* until nothing is left to explore. **STOP** (or Space) halts all motion,
-**Pause** freezes the mission, **Finish & report** ends it and writes the
-report. Add `--web` to get the same console in a browser at
-<http://localhost:8765> instead (`--host 0.0.0.0` to open it from a phone).
+**Before a run:** put the robot in the middle of a maze cell, facing along the
+maze (`grid_start_centered`), and set your tile size once in Settings > Grid
+(then **Save settings**).
 
-Window keys: Space = STOP, W/A/S/D = drive/strafe, Q/E = rotate (while no text
-box is being edited), F = fit map, R = follow robot, +/- = zoom, mouse wheel =
-zoom, drag = pan. Number boxes apply on Enter.
+Press **Start mission**. The first mission calibrates the robot and saves the
+result to `config/slam_calibration_robot.yaml`; later missions reuse it and
+start straight away (Control > **Auto calibrate** measures again). The robot
+then repeats *scan → move one cell → scan* until every reachable cell is
+explored. **STOP** (or Space) halts all motion, **Pause** freezes the mission,
+**Finish & report** ends it and writes the report.
+
+Keys: Space = STOP, W/A/S/D = drive/strafe, Q/E = rotate, F = fit map,
+R = follow robot, +/- or mouse wheel = zoom, drag = pan.
 
 | Console part | What it does |
 | --- | --- |
-| Map | Live occupancy grid, trajectory, last scan, frontiers, planned path, ground truth. Zoom (wheel), pan (drag), rotate the view (Rotate L/R, also rotates saved images), follow robot, layer toggles. |
-| Map modes | **Go to** (click a target) · **Set pose** (drag to fix the robot's pose) · **Border** (drag the area to explore and score) · **GT wall** / **GT arena** (draw the ground truth). |
-| Status | Map Accuracy and Coverage, SLAM pose vs odometry vs drift correction, start pose, pose in the arena frame, ToF, gimbal, mission stats, report (start / end), charts of ToF, coverage, accuracy, speed and drift correction over the whole run, polar plot of the last scan. |
-| Control | WASD/QE manual drive with speed sliders, rotate robot by ±45/90/180 or any angle, move, go to x/y, go home, scan now, auto calibrate, aim gimbal, ToF wall calibration, set / rotate the pose estimate, clear map, new session. |
-| Settings | Every setting (map size and resolution, border, scan range/speed/mode, noise filters, localisation, speeds, safety distances, exploration limits, scoring) with ranges and help. Changes apply at once; **Save settings** writes `config/slam_settings.yaml`. |
-| Ground truth | Load (file path) / draw / save the arena map as JSON and set where the robot starts in it. |
-| Results | The run folder's files (click to open) and the latest saved map. |
+| Map | Live map, trajectory, last scan, plan, grid walls (unknown edges dashed), ground truth. Layers: Clean (grid map) · Maze · Path · Scan · Plan · GT. Modes: **Go to** (click) · **Set pose** (drag) · **Border** (drag the area to explore and score) · **GT wall** / **GT arena** (draw the ground truth). |
+| Status | Map Accuracy, Coverage, position, start, grid, ToF, mission report (start / end), charts over the whole run, last scan. |
+| Control | Manual drive, rotate robot (left / right 90°, 180°), scan now, go home, auto calibrate, clear map, new session, re-detect grid. |
+| Settings | The essential settings; tick *show all settings* for everything. **Save settings** writes `config/slam_settings.yaml`. |
+| Ground truth | Load / draw / save the arena map and set where the robot starts in it. |
+| Results | The run folder's files and the latest saved map. |
 
-### Auto grid (maze arenas)
+### Maze grid
 
 The arena is treated as a maze whose walls lie on a square grid
-(`grid_mode`, Settings > Grid):
+(Settings > Grid):
 
-- **Finding the grid** – the grid angle comes from the directions of the walls
-  (they meet at 90°); the cell size and offset are the ones that put the most
-  wall points on grid lines. The angle locks once three detections agree; the
-  cell size only locks after three confident, agreeing detections, so a noisy
-  start never locks a wrong grid. If you know your tile size, set
-  `grid_mode: fixed` and `grid_cell_m` and it locks at once.
-- **Straight maps** – each scan is snapped to the locked grid (heading, then
-  position), and every grid edge is voted *wall / open / unknown*. A wall seen
-  along part of an edge becomes the whole edge (gaps filled); blobs off the grid
-  lines disappear. The Clean layer shows this map; Maze draws the voted walls
-  (unknown edges dashed).
-- **Moving grid by grid, scanning grid by grid** – once the grid is known the
-  robot moves one cell at a time (`grid_cells_per_step: 1`) and scans in every
-  cell. Each step: turn to the grid axis, strafe back onto the cell's centre
-  line (mecanum wheels), point the ToF ahead and check the edge is really open
-  (if a wall is closer than the edge, it is marked as a wall and the robot does
-  not move), then drive exactly to the next cell centre and scan. Routes only
-  use open edges, toward the nearest cell that is unseen or still has an unknown
-  wall; the mission ends when none is left. With `grid_mode: fixed` this starts
-  after the first scan; in auto mode the robot explores freely until the grid
-  is confirmed.
+- **Finding the grid** – the robot starts in the middle of a cell, so that
+  fixes where the grid lines are. With `grid_mode: fixed` the tile size is
+  known and grid moves start after the first scan; in `auto` the cell size is
+  measured from the walls and only used once three confident detections agree
+  (the robot explores freely until then). The grid angle locks once three
+  detections agree.
+- **Clean map** – each scan is snapped to the grid (heading, then position),
+  and every grid edge is voted *wall / open / unknown*: a wall seen along part
+  of an edge becomes the whole edge (gaps filled), blobs off the grid lines
+  disappear.
+- **Grid by grid** – every step moves exactly one cell and then scans: turn to
+  the grid axis, strafe back onto the cell's centre line (mecanum wheels),
+  check with the ToF that the edge ahead is open (a wall there marks the edge
+  closed and the robot does not move), drive to the next cell centre, never
+  closer to a wall than `stop_distance_m`. Routes go through open edges to the
+  nearest cell that is unseen or still has an unknown wall; when none is
+  reachable the robot tries the current cell's unknown edges with the ToF,
+  then free exploration, and only then finishes.
 
 Rebuild a recorded run with the current settings (no robot needed), e.g. to try
 another cell size:

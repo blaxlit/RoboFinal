@@ -120,11 +120,13 @@ def _comb(x, cell, win=0.02, step=0.005):
     return k[i] / max(len(x), 1) - (2 * w + 1) / nb, (i + 0.5) * cell / nb
 
 
-def detect(pts, ang, params, previous=None, history=(), final=False):
+def detect(pts, ang, params, previous=None, history=(), final=False, anchor=None):
     """Fit the lattice to oriented wall points. None if there is too little.
 
     history: earlier models (oldest first) used to confirm the cell size.
     final: relaxed rules, for drawing the saved map from all the data.
+    anchor: (x, y) that is a cell centre (the start pose): the lattice offset is
+    taken from it instead of fitted, which is exact from the first scan.
     """
     if len(pts) < 40:
         return None
@@ -154,6 +156,10 @@ def detect(pts, ang, params, previous=None, history=(), final=False):
         sv, ov = _comb(V[along_u], cell)
         results.append((su + sv, float(cell), ou, ov))
     score, cell, ou, ov = max(results)
+    if anchor is not None:
+        a0 = c * anchor[0] + s * anchor[1]
+        a1 = -s * anchor[0] + c * anchor[1]
+        ou, ov = (a0 - cell / 2) % cell, (a1 - cell / 2) % cell
     # how clearly this cell size beats a different one (not a neighbour of it)
     def related(c):  # neighbours and exact multiples / fractions fit the same walls
         ratio = c / cell if c > cell else cell / c
@@ -372,8 +378,25 @@ def render(model, edges, grid, params):
     return out
 
 
-def neighbours(edges, cell, blocked=()):
-    """Cells reachable from ``cell`` through open edges (lattice indices)."""
+def edge_state(edges, a_cell, b_cell):
+    """State of the edge between two neighbouring cells (EDGE_UNKNOWN outside the map)."""
+    (i, j), (k, l) = a_cell, b_cell
+    if i != k:  # vertical edge at u = max(i, k)
+        a = max(i, k) - edges.i0
+        b = j - edges.j0
+        if 0 <= a < edges.vert.shape[0] and 0 <= b < edges.vert.shape[1]:
+            return int(edges.vert[a, b])
+    else:
+        a = i - edges.i0
+        b = max(j, l) - edges.j0
+        if 0 <= a < edges.horz.shape[0] and 0 <= b < edges.horz.shape[1]:
+            return int(edges.horz[a, b])
+    return EDGE_UNKNOWN
+
+
+def neighbours(edges, cell, blocked=(), opened=()):
+    """Cells reachable from ``cell`` through open edges (lattice indices).
+    ``opened`` edges were checked open with the ToF; ``blocked`` were not."""
     i, j = cell
     a, b = i - edges.i0, j - edges.j0
     ni, nj = edges.cell_free.shape
@@ -383,8 +406,9 @@ def neighbours(edges, cell, blocked=()):
     for (da, db), state in (((1, 0), edges.vert[a + 1, b]), ((-1, 0), edges.vert[a, b]),
                             ((0, 1), edges.horz[a, b + 1]), ((0, -1), edges.horz[a, b])):
         n = (i + da, j + db)
-        if state == EDGE_OPEN and 0 <= a + da < ni and 0 <= b + db < nj and \
-                frozenset((cell, n)) not in blocked:
+        key = frozenset((cell, n))
+        if (state == EDGE_OPEN or key in opened) and 0 <= a + da < ni and 0 <= b + db < nj and \
+                key not in blocked:
             out.append(n)
     return out
 

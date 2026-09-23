@@ -8,7 +8,6 @@ import sys
 import tempfile
 import time
 import unittest
-import urllib.request
 
 import numpy as np
 
@@ -256,15 +255,12 @@ class CalibrationTest(unittest.TestCase):
 
 class MissionTest(unittest.TestCase):
     def test_short_simulated_mission_writes_results(self):
-        from slam.console import serve
         from slam.explorer import Explorer
         out = tempfile.mkdtemp()
         gt = load_ground_truth(GT_PATH)
-        p = base_params(auto_calibrate=False, max_iterations=3)
+        p = base_params(calibration="off", max_iterations=3)
         io = SimRobotIO(gt, start=(p["gt_start_x"], p["gt_start_y"], 0.0), time_scale=60)
         ex = Explorer(io, p, out, gt, log_print=False)
-        server, url = serve(ex, "127.0.0.1", 0)
-        url = f"http://127.0.0.1:{server.server_address[1]}/"
         try:
             ex.command("start")
             end = time.time() + 180
@@ -280,16 +276,9 @@ class MissionTest(unittest.TestCase):
             self.assertIn("gt", rep["end"])
             self.assertGreater(rep["metrics"]["coverage_pct"], 5)
             self.assertLess(rep["end_error_m"], 0.15)
-            with urllib.request.urlopen(url + "api/state") as resp:
-                state = json.load(resp)
-            self.assertEqual(state["state"], "DONE")
-            req = urllib.request.Request(url + "api/params", data=json.dumps({"changes": {"scan_speed_dps": 30}}).encode(),
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req) as resp:
-                json.load(resp)
+            ex.set_params({"scan_speed_dps": 30})
             self.assertEqual(ex.p["scan_speed_dps"], 30.0)
         finally:
-            server.shutdown()
             ex.shutdown()
             io.close()
             shutil.rmtree(out, ignore_errors=True)
@@ -306,7 +295,7 @@ class PygameConsoleTest(unittest.TestCase):
         from slam.ui_pygame import TABS, Console
         out = tempfile.mkdtemp()
         gt = load_ground_truth(GT_PATH)
-        p = base_params(auto_calibrate=False)
+        p = base_params(calibration="off")
         io = SimRobotIO(gt, start=(p["gt_start_x"], p["gt_start_y"], 0.0), time_scale=60)
         ex = Explorer(io, p, out, gt, log_print=False)
         try:

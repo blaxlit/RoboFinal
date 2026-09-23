@@ -73,7 +73,7 @@ def replay(run_dir, params, log=print):
                 wall_pts.append((pts, ang))
             if model is None or not model.cell_trusted:  # locked once trusted, like the live explorer
                 new = gm.detect(np.concatenate([a for a, _ in wall_pts]), np.concatenate([b for _, b in wall_pts]),
-                                p, model, history)
+                                p, model, history, anchor=poses[0][:2] if p["grid_start_centered"] else None)
                 if new is not None:
                     history.append(new)
                     model = new
@@ -83,7 +83,7 @@ def replay(run_dir, params, log=print):
     edges = clean = None
     if wall_pts and (model is None or not model.cell_trusted):
         model = gm.detect(np.concatenate([a for a, _ in wall_pts]), np.concatenate([b for _, b in wall_pts]),
-                          p, model, final=True)
+                          p, model, final=True, anchor=poses[0][:2] if p["grid_start_centered"] and poses else None)
     if model is not None and model.cell_trusted:
         edges = gm.classify_edges(model, grid, raw, p)
         clean = gm.render(model, edges, grid, p)

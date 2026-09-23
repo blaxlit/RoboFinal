@@ -48,9 +48,9 @@ MODE_HINTS = {"goto": "Click where the robot should drive",
               "border": "Drag a rectangle: exploration and scoring stay inside it",
               "wall": "Drag along a real wall (arena frame, snapped)",
               "gtborder": "Drag the arena's outer rectangle"}
-LAYERS = [("clean", "Clean"), ("maze", "Maze"), ("prob", "Prob"), ("traj", "Path"), ("scan", "Scan"),
-          ("plan", "Plan"), ("gt", "GT"), ("grid", "Lines"), ("truth", "Truth")]
-CHARTS = [("tof", "ToF"), ("cov", "Coverage"), ("speed", "Speed"), ("match", "Drift fix"), ("loc_error", "Loc err")]
+LAYERS = [("clean", "Clean"), ("maze", "Maze"), ("traj", "Path"), ("scan", "Scan"), ("plan", "Plan"),
+          ("gt", "GT"), ("truth", "Truth")]
+CHARTS = [("tof", "ToF"), ("cov", "Coverage"), ("loc_error", "Loc err (sim)")]
 SNAPS = [0.01, 0.05, 0.1, 0.3, 0.6]
 
 
@@ -327,7 +327,7 @@ class Console:
         self.log_scroll = 0          # lines from the bottom
         self.log_debug = False
         self.chart = "tof"
-        self.groups_open = {"Map": True, "Scan": True}
+        self.groups_open = {"Map": True, "Scan": True, "Grid": True, "Motion": True, "Explore": True}
         self.set_filter = ""
         self.inputs = {"turn": 30.0, "move": 0.3, "gx": 0.0, "gy": 0.0, "gim": 90.0, "wall": 0.5,
                        "spx": 0.0, "spy": 0.0, "spt": 0.0, "speed": 0.25, "turn_rate": 45.0}
@@ -851,7 +851,8 @@ class Console:
                 self.layers[k] = not self.layers[k]
                 self._map_cache = (None, None)
             return fn
-        layers = [(lbl, self.layers[k], toggle(k)) for k, lbl in LAYERS]
+        sim = bool(self.snap and self.snap.get("true_pose"))
+        layers = [(lbl, self.layers[k], toggle(k)) for k, lbl in LAYERS if k != "truth" or sim]
         if x + 360 > rect.right:
             x, y = rect.x + 8, y + 38
         group(layers, x, y)
@@ -1043,10 +1044,9 @@ class Console:
         y += 88
         y = self.section("Robot position (x forward at start, y left)", x, y)
         g = self.to_gt(s["pose"]["x"], s["pose"]["y"])
-        rows = [("SLAM pose", fpose(s["pose"])), ("Odometry", fpose(s["odom"])), ("Drift correction", fpose(s["corr"])),
-                ("Start", fpose(s["start"])),
-                ("In arena frame", f"{g[0]:.2f}, {g[1]:.2f} m  {s['pose']['deg'] + self.p['gt_start_deg']:.1f}°"
-                 if self.gt_server else "–")]
+        rows = [("Position", fpose(s["pose"])), ("Start", fpose(s["start"]))]
+        if self.gt_server:
+            rows.append(("In arena frame", f"{g[0]:.2f}, {g[1]:.2f} m  {s['pose']['deg'] + self.p['gt_start_deg']:.1f}°"))
         if s.get("true_pose"):
             t = s["true_pose"]
             err = math.hypot(t["x"] - s["pose"]["x"], t["y"] - s["pose"]["y"]) * 100
@@ -1056,19 +1056,13 @@ class Console:
             rows.append(("Maze grid", f"{g['cell_m']:.3f} m cells, {g['theta_deg']:+.1f}°"
                          + ("" if g["cell_trusted"] else " (checking)")))
             if "walls" in m.get("grid", {}):
-                mg = m["grid"]
-                rows.append(("Edges wall / open, cells", f"{mg['walls']} / {mg['open']}, {mg['cells_seen']} seen"))
-        rows += [("ToF ahead", "no reading" if s["tof_m"] is None else f"{s['tof_m']:.3f} m"),
-                 ("Gimbal yaw", f"{s['gimbal_deg']:.1f}°")]
+                rows.append(("Cells explored", str(m["grid"]["cells_seen"])))
+        rows.append(("ToF ahead", "no reading" if s["tof_m"] is None else f"{s['tof_m']:.3f} m"))
         y = self.kv(rows, x, y, w) + 10
         y = self.section("Mission", x, y)
         st = s["stats"]
         rows = [("State", s["state"] + (f" · {s['detail']}" if s["detail"] else "")), ("Scans", str(st["scans"])),
-                ("Distance driven", f"{st['distance_m']:.2f} m"), ("Cycles", str(st["iterations"])),
-                ("Emergency stops", str(st["blocked_moves"]))]
-        if "wall_found" in m:
-            rows += [("Walls found / missed / false", f"{m['wall_found']} / {m['wall_missed']} / {m['false_walls']}"),
-                     ("Accuracy strict / explored", f"{m['strict_accuracy_pct']:.1f}% / {m['explored_accuracy_pct']:.1f}%")]
+                ("Distance driven", f"{st['distance_m']:.2f} m"), ("Emergency stops", str(st["blocked_moves"]))]
         y = self.kv(rows, x, y, w) + 10
         if s.get("report"):
             r = s["report"]
@@ -1220,59 +1214,32 @@ class Console:
         y += 100
         y = self.section("Rotate robot", x, y)
         bx = x
-        for lbl, deg in (("-90°", -90), ("-45°", -45), ("+45°", 45), ("+90°", 90), ("180°", 180)):
-            if ui.button(pygame.Rect(bx, y, 64, 28), lbl):
+        for lbl, deg in (("Left 90°", 90), ("Right 90°", -90), ("Turn 180°", 180)):
+            if ui.button(pygame.Rect(bx, y, 100, 30), lbl):
                 self.cmd("turn", deg=deg)
-            bx += 70
-        y += 36
-        y = self.num_row(x, y, w, ["by", ("turn", 70), "° (+ = left)",
-                                   ("Turn", lambda: self.cmd("turn", deg=inp["turn"]), 60)])
-        y = self.section("Move", x, y + 4)
-        y = self.num_row(x, y, w, ["forward", ("move", 70), "m", ("Move", lambda: self.cmd("move", m=inp["move"]), 60),
-                                   ("Go home", lambda: self.cmd("home"), 80)])
-        y = self.num_row(x, y, w, ["go to x", ("gx", 60), "y", ("gy", 60),
-                                   ("Go", lambda: self.cmd("goto", x=inp["gx"], y=inp["gy"]), 50)])
-        y = self.section("Sensors", x, y + 4)
+            bx += 106
+        y += 42
+        y = self.section("Robot", x, y)
         bx = x
-        for lbl, name, bw in (("Scan now", "scan", 90), ("Auto calibrate", "calibrate", 120),
-                              ("Centre gimbal", "gimbal_center", 116)):
-            if ui.button(pygame.Rect(bx, y, bw, 28), lbl):
+        for lbl, name, bw in (("Scan now", "scan", 100), ("Go home", "home", 100), ("Auto calibrate", "calibrate", 130)):
+            if ui.button(pygame.Rect(bx, y, bw, 30), lbl):
                 self.cmd(name)
             bx += bw + 6
         y += 36
-        y = self.num_row(x, y, w, ["gimbal to", ("gim", 60), "°",
-                                   ("Aim", lambda: self.cmd("gimbal_to", deg=inp["gim"]), 50)])
-        y = self.num_row(x, y, w, ["wall at", ("wall", 60), "m from lens",
-                                   ("Calibrate ToF", lambda: self.cmd("calibrate_wall", distance=inp["wall"]), 110)])
-        y = self.section("Map & pose", x, y + 4)
-        y = self.num_row(x, y, w, ["pose x", ("spx", 56), "y", ("spy", 56), "θ", ("spt", 56),
-                                   ("Set", lambda: self.cmd("set_pose", x=inp["spx"], y=inp["spy"], deg=inp["spt"]), 44)])
-        bx = x + ui.label("rotate estimate", x, y + 5, "s", "muted") + 8
-        for d in (-5, -1, 1, 5):
-            if ui.button(pygame.Rect(bx, y, 46, 26), f"{d:+d}°"):
-                self.cmd("rotate_pose", deg=d)
-            bx += 50
-        y += 36
+        for ln in ui.wrap("Auto calibrate measures the robot again and saves it; missions reuse the saved values.",
+                          "xs", w):
+            ui.label(ln, x, y, "xs", "muted")
+            y += 15
+        y = self.section("Map", x, y + 10)
         bx = x
         for lbl, fn, bw in (
-                ("Clear map", lambda: self.ask("Clear the map? The pose is kept.", lambda: self.cmd("reset_map")), 90),
-                ("Clear ignored frontiers", lambda: self.cmd("clear_blacklist"), 170),
+                ("Clear map", lambda: self.ask("Clear the map? The pose is kept.", lambda: self.cmd("reset_map")), 100),
                 ("New session", lambda: self.ask("Start a new session? Map and trajectory are cleared and a new run "
-                                                 "folder is made.", self._new_session), 110)):
-            if ui.button(pygame.Rect(bx, y, bw, 28), lbl):
+                                                 "folder is made.", self._new_session), 110),
+                ("Re-detect grid", lambda: self.cmd("redetect_grid"), 130)):
+            if ui.button(pygame.Rect(bx, y, bw, 30), lbl):
                 fn()
             bx += bw + 6
-        y += 36
-        y = self.section("Maze grid", x, y + 4)
-        g = (self.snap or {}).get("grid")
-        info = "not found yet" if not g else (f"{g['cell_m']:.3f} m cells, angle {g['theta_deg']:+.1f}°, "
-                                              + ("locked" if g["cell_trusted"] else "cell size not confirmed yet"))
-        for ln in ui.wrap(info + ". Set Settings > Grid > grid_mode = fixed and grid_cell_m to your tile size "
-                          "to lock it at once.", "s", w):
-            ui.label(ln, x, y, "s", "muted")
-            y += 18
-        if ui.button(pygame.Rect(x, y + 4, 130, 28), "Re-detect grid"):
-            self.cmd("redetect_grid")
         return y + 40
 
     def _new_session(self):
@@ -1298,14 +1265,18 @@ class Console:
             ui.label("filter…", x + 216, y + 6, "s", "muted")
         y += 36
         for ln in ui.wrap("Changes apply immediately (Enter). Blue names differ from the defaults; * = changing it clears "
-                          "the map. Rotate robot: + turns left.",
+                          "the map.",
                           "xs", w):
             ui.label(ln, x, y, "xs", "muted")
             y += 15
         y += 6
+        self.show_all = ui.checkbox(pygame.Rect(x, y, 200, 22), getattr(self, "show_all", False), "show all settings")
+        y += 30
         groups = {}
         for spec in params_mod.schema():
             if self.set_filter and self.set_filter not in (spec["key"] + " " + spec["help"]).lower():
+                continue
+            if not self.show_all and not self.set_filter and spec["key"] not in params_mod.ESSENTIAL:
                 continue
             groups.setdefault(spec["group"], []).append(spec)
         for g, items in groups.items():

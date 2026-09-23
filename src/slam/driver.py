@@ -156,6 +156,7 @@ class Driver:
         blocked = False
         last_tof_t = self.io.now()
         travelled = 0.0
+        close = 0  # consecutive readings under the stop distance (one alone may be noise)
         try:
             while self.io.now() < end:
                 self.checkpoint()
@@ -168,11 +169,13 @@ class Driver:
                 samples = self.io.tof_since(last_tof_t)
                 if samples:
                     last_tof_t = samples[-1][0]
-                    if on_tof:
-                        for t, mm in samples:
+                    for t, mm in samples:
+                        if on_tof:
                             on_tof(t, mm / 1000.0)
+                        reading = mm / 1000.0 * self.p["tof_scale"] + self.p["tof_bias_m"]
+                        close = close + 1 if 0 < mm < 9990 and reading < self.p["stop_distance_m"] else 0
                 front = self.tof_m() * self.p["tof_scale"] + self.p["tof_bias_m"]
-                if sign > 0 and math.isfinite(front) and front < self.p["stop_distance_m"]:
+                if sign > 0 and close >= 2:
                     # close to the goal this is just arriving next to a wall
                     blocked = remaining > 0.08
                     self.last_blocked_range = front

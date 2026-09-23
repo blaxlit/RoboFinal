@@ -131,7 +131,8 @@ class Explorer:
         self.grid_history = []        # earlier detections, to confirm the cell size
         self.scanned_cells = set()
         self.cell_tries = collections.Counter()
-        self.blocked_edges = set()
+        self.blocked_edges = set()    # edges found closed by the ToF / an emergency stop
+        self.opened_edges = set()     # edges checked open with the ToF
         self._view_aligned = False
 
     def _make_grid(self):
@@ -367,6 +368,7 @@ class Explorer:
             self.state = "CALIBRATING"
             self.calibration.update(self.calibrator.wall(float(args["distance"])))
             self.param_version += 1
+            params_mod.save_calibration(self.io.name, self.p, self.calibration)
         elif name == "turn":
             self.state = "MOVING"
             self.driver.turn_by(math.radians(float(args["deg"])))
@@ -390,12 +392,25 @@ class Explorer:
         elif name == "finish_now":
             self.finish("operator finished")
 
+    def load_saved_calibration(self):
+        """Apply the stored calibration for this robot. True if there was one."""
+        saved = params_mod.load_calibration(self.io.name)
+        if not saved:
+            return False
+        self.p.update(saved)
+        self.calibration.update(saved)
+        self.param_version += 1
+        self.log("Using the saved calibration - no calibration run needed (Control > Auto calibrate to redo it)")
+        return True
+
     def calibrate(self):
         self.log("Auto calibration started")
         before = self.pose()
         res = self.calibrator.run(with_motion=self.p["calibrate_with_motion"])
         self.calibration.update(res)
         self.param_version += 1
+        path = params_mod.save_calibration(self.io.name, self.p, res)
+        self.log(f"Calibration saved to {os.path.relpath(path)} - later runs reuse it")
         with self.lock:
             # the robot ends where it started, but the signs and drift may have
             # changed what odometry means, so re-anchor the pose
@@ -419,7 +434,8 @@ class Explorer:
                                                                   math.degrees(self.start_pose[2])))
         reason = "stopped"
         try:
-            if p["auto_calibrate"]:
+            mode = p["calibration"]
+            if mode == "always" or (mode == "saved" and not self.load_saved_calibration()):
                 self.state = "CALIBRATING"
                 self.calibrate()
             attempts = collections.Counter()
@@ -439,20 +455,21 @@ class Explorer:
                     self.do_scan()
                 skip_scan = False
                 cov = self.metrics.get("coverage_pct")
-                if cov is not None and (p["border_enabled"] or self.gt) and cov >= p["coverage_goal_pct"]:
+                # on a grid the robot visits every reachable cell instead of stopping at a coverage goal
+                if cov is not None and (p["border_enabled"] or self.gt) and cov >= p["coverage_goal_pct"] \
+                        and not self.grid_ready():
                     reason = f"coverage goal reached ({cov:.1f}%)"
                     break
                 self.state = "PLANNING"
                 if self.grid_ready():
-                    step = self.grid_step()
                     self.stats["iterations"] += 1
-                    if step == "done":
-                        reason = "every reachable grid cell explored"
-                        break
-                    continue
+                    if self.grid_step() == "moved":
+                        continue
+                    # no cell left to reach on the grid: look for anything else unexplored
                 info = self.plan_frontier()
                 if info is None:
-                    reason = "no reachable frontier left - exploration complete"
+                    reason = ("every reachable grid cell explored" if self.grid_ready()
+                              else "no reachable frontier left - exploration complete")
                     break
                 key = tuple(int(v) // max(1, int(0.3 / self.grid.res)) for v in info["goal"])
                 attempts[key] += 1
@@ -523,7 +540,8 @@ class Explorer:
             dth = math.degrees(wrap(pose[2] - guess[2]))
             self.series["match"].append((round(self.elapsed(), 2), round(math.hypot(dx, dy) * 100, 2)))
             if math.hypot(dx, dy) > 0.005 or abs(dth) > 0.3:
-                self.log(f"Scan {sid}: localisation corrected by ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {dth:+.1f} deg")
+                self.log(f"Scan {sid}: localisation corrected by ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {dth:+.1f} deg",
+                         "debug")
         pose = self._snap_to_grid(pose, angles, ranges, hits, sid)
         true = self.true_pose_world()
         if true is not None:
@@ -552,7 +570,7 @@ class Explorer:
                                                        round(float(y), 4)])
         n_hit = int(hits.sum())
         self.log(f"Scan {sid}: {len(samples)} readings -> {len(angles)} beams ({n_hit} walls) "
-                 f"at ({pose[0]:.2f}, {pose[1]:.2f}, {math.degrees(pose[2]):.0f} deg)")
+                 f"at ({pose[0]:.2f}, {pose[1]:.2f}, {math.degrees(pose[2]):.0f} deg)", "debug")
         if p["grid_mode"] != "off":
             wx, wy, _ = beams_to_world(pose, angles[hits], ranges[hits], p)
             pts, ang = gm.oriented_points(wx, wy)
@@ -575,7 +593,7 @@ class Explorer:
         dx, dy, dth = gm.snap_pose(model, pose, pts, ang)
         if abs(dx) + abs(dy) < 1e-4 and abs(dth) < 1e-5:
             return pose
-        self.log(f"Scan {sid}: grid snap ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {math.degrees(dth):+.1f} deg")
+        self.log(f"Scan {sid}: grid snap ({dx * 100:+.1f}, {dy * 100:+.1f}) cm, {math.degrees(dth):+.1f} deg", "debug")
         return pose[0] + dx, pose[1] + dy, wrap(pose[2] + dth)
 
     def update_grid_model(self, log=False):
@@ -590,7 +608,8 @@ class Explorer:
         else:
             pts = np.concatenate([a for a, _ in self.wall_pts[-80:]])
             ang = np.concatenate([b for _, b in self.wall_pts[-80:]])
-            model = gm.detect(pts, ang, p, prev, self.grid_history)
+            anchor = self.start_pose[:2] if p["grid_start_centered"] else None
+            model = gm.detect(pts, ang, p, prev, self.grid_history, anchor=anchor)
             if model is None:
                 return
             self.grid_history = (self.grid_history + [model])[-5:]
@@ -614,7 +633,7 @@ class Explorer:
                 and self.grid_model.cell_trusted and self.grid_edges is not None)
 
     def grid_plan(self):
-        """Nearest cell (through open edges) that still needs looking at."""
+        """Path of cells (through open edges) to the nearest cell that still needs a look."""
         model, edges, p = self.grid_model, self.grid_edges, self.p
         x, y, _ = self.pose()
         start = gm.cell_of(model, x, y)
@@ -627,95 +646,110 @@ class Explorer:
             if not (0 <= a < edges.cell_free.shape[0] and 0 <= b < edges.cell_free.shape[1]):
                 continue
             unseen = edges.cell_free[a, b] < p["grid_cell_seen_frac"]
-            needs = unseen or gm.unknown_count(edges, c) > 0
-            if c != start and needs and c not in self.scanned_cells and self.cell_tries[c] < 3:
-                if inside is not None:
-                    r, cc = self.grid.world_to_cell(*gm.cell_center(model, c))
-                    if not (self.grid.inside(r, cc) and inside[r, cc]):
-                        needs = False
-                if needs:
-                    path = [c]
-                    while prev[path[-1]] is not None:
-                        path.append(prev[path[-1]])
-                    return path[::-1]
-            for n in gm.neighbours(edges, c, self.blocked_edges):
+            needs = (unseen or gm.unknown_count(edges, c) > 0) and c != start
+            if needs and c not in self.scanned_cells and self.cell_tries[c] < 3 and self._inside(c, inside):
+                path = [c]
+                while prev[path[-1]] is not None:
+                    path.append(prev[path[-1]])
+                return path[::-1]
+            for n in gm.neighbours(edges, c, self.blocked_edges, self.opened_edges):
                 if n not in prev:
                     prev[n] = c
                     queue_.append(n)
         return None
 
+    def _inside(self, cell, inside):
+        if inside is None:
+            return True
+        r, c = self.grid.world_to_cell(*gm.cell_center(self.grid_model, cell))
+        return bool(self.grid.inside(r, c) and inside[r, c])
+
+    def _probe_target(self, here):
+        """A neighbour behind an edge the map is unsure about, to check with the ToF."""
+        edges = self.grid_edges
+        inside = border_mask(self.grid, self.p) if self.p["border_enabled"] else None
+        options = []
+        for d in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            n = (here[0] + d[0], here[1] + d[1])
+            key = frozenset((here, n))
+            if key in self.blocked_edges or key in self.opened_edges or not self._inside(n, inside):
+                continue
+            if gm.edge_state(edges, here, n) == gm.EDGE_WALL:
+                continue
+            options.append((n in self.scanned_cells, n))
+        options.sort()
+        return options[0][1] if options else None
+
     def grid_step(self):
-        path = self.grid_plan()
-        if path is None:
-            return "done"
+        """Move exactly one cell (then the mission loop scans again).
+        Returns "moved", or "stuck" when no neighbour can be tried."""
         model = self.grid_model
-        target = path[-1]
-        # one cell at a time (grid_cells_per_step), then scan again and re-plan
-        path = path[:1 + max(1, int(self.p["grid_cells_per_step"]))]
-        if path[-1] == target:
+        x, y, _ = self.pose()
+        here = gm.cell_of(model, x, y)
+        path = self.grid_plan()
+        if path is not None and len(path) >= 2:
+            nxt, target = path[1], path[-1]
+        else:
+            nxt = target = self._probe_target(here)
+            if nxt is None:
+                return "stuck"
+        if nxt == target:
             self.cell_tries[target] += 1
-        centers = [gm.cell_center(model, c) for c in path]
+        centre = gm.cell_center(model, nxt)
         with self.lock:
-            self.plan = {"frontiers": [], "goal": [round(v, 3) for v in centers[-1]],
-                         "path": [[round(x, 3), round(y, 3)] for x, y in [self.pose()[:2]] + centers[1:]]}
-        self.log(f"Grid: cell {path[0]} -> {path[-1]}" + ("" if path[-1] == target else f" (heading for {target})"))
+            self.plan = {"frontiers": [], "goal": [round(v, 3) for v in gm.cell_center(model, target)],
+                         "path": [[round(x, 3), round(y, 3)], [round(centre[0], 3), round(centre[1], 3)]]}
+        self.log(f"Cell {here} -> {nxt}" + ("" if nxt == target else f" (on the way to {target})"))
         self.state = "MOVING"
-        self.grid_follow(path)
+        self.grid_move(here, nxt)
         return "moved"
 
-    def grid_follow(self, path):
-        """Drive cell centre to cell centre along grid axes, centring on the way."""
+    def grid_move(self, here, nxt):
+        """Turn to the grid axis, centre, check the edge ahead with the ToF, drive one cell."""
         p, model = self.p, self.grid_model
-        runs = []
-        for a, b in zip(path, path[1:]):
-            d = (b[0] - a[0], b[1] - a[1])
-            if runs and runs[-1][0] == d and not p["grid_stop_each_cell"]:
-                runs[-1][1].append(b)
-            else:
-                runs.append((d, [b]))
-        cur = path[0]
-        for d, cells in runs:
-            self._checkpoint()
-            if self._finish:
-                raise Finish()
-            heading = model.theta + math.atan2(d[1], d[0])
-            x, y, th = self.pose()
-            err = wrap(heading - th)
-            if abs(err) > math.radians(p["turn_tolerance_deg"]):
-                self.detail = f"turning {math.degrees(err):+.0f} deg"
-                self.driver.turn_by(err)
-            # centre on the line through the cell centres
-            x, y, th = self.pose()
-            cx, cy = gm.cell_center(model, cur)
-            lx, ly = -math.sin(heading), math.cos(heading)
-            off = (cx - x) * lx + (cy - y) * ly
-            if abs(off) > p["grid_center_tol_m"]:
-                self.detail = f"centring {off * 100:+.0f} cm"
-                self.driver.strafe(off)
-            # look before driving: the ToF must see past the edge into the next cell
-            front = self.driver.front_range()
-            need = model.cell / 2 - p["tof_offset_m"] - p["gimbal_offset_x_m"] + 0.12
-            if front is not None and front < need:
-                self.blocked_edges.add(frozenset((cur, cells[0])))
-                self.log(f"Wall ahead at {front:.2f} m between cells {cur} and {cells[0]} - not moving, "
-                         f"marking that edge as a wall", "warn")
-                return False
-            ex, ey = gm.cell_center(model, cells[-1])
-            x, y, _ = self.pose()
-            dist = (ex - x) * math.cos(heading) + (ey - y) * math.sin(heading)
-            self.detail = f"to cell {cells[-1]} ({dist:.2f} m)"
-            moved, blocked = self.driver.forward(dist, on_tof=self._moving_tof) if dist > 0.02 else (0.0, False)
-            if blocked:
-                # something is in the way: treat the next edge as closed
-                self.stats["blocked_moves"] += 1
-                nxt = cells[min(len(cells) - 1, int(moved / model.cell + 0.5))]
-                prv = cur if nxt == cells[0] else cells[cells.index(nxt) - 1]
-                self.blocked_edges.add(frozenset((prv, nxt)))
-                self.log(f"Emergency stop between cells {prv} and {nxt} - treating that edge as a wall", "warn")
-                return False
-            cur = cells[-1]
-            if p["grid_scan_each_cell"] and cur != path[-1]:
-                self.state_scan_between_legs()
+        self._checkpoint()
+        if self._finish:
+            raise Finish()
+        key = frozenset((here, nxt))
+        heading = model.theta + math.atan2(nxt[1] - here[1], nxt[0] - here[0])
+        x, y, th = self.pose()
+        err = wrap(heading - th)
+        if abs(err) > math.radians(p["turn_tolerance_deg"]):
+            self.detail = f"turning {math.degrees(err):+.0f} deg"
+            self.driver.turn_by(err)
+        # centre on the line through the two cell centres (mecanum strafe)
+        x, y, th = self.pose()
+        cx, cy = gm.cell_center(model, here)
+        lx, ly = -math.sin(heading), math.cos(heading)
+        off = (cx - x) * lx + (cy - y) * ly
+        if abs(off) > p["grid_center_tol_m"]:
+            self.detail = f"centring {off * 100:+.0f} cm"
+            self.driver.strafe(off)
+        # look before driving: the ToF must see past the edge into the next cell
+        front = self.driver.front_range()
+        x, y, _ = self.pose()
+        to_edge = (cx - x) * math.cos(heading) + (cy - y) * math.sin(heading) + model.cell / 2
+        lens = p["tof_offset_m"] + p["gimbal_offset_x_m"]
+        if front is not None and front + lens < to_edge + 0.12:
+            self.blocked_edges.add(key)
+            self.log(f"Wall {front:.2f} m ahead - edge {here}-{nxt} is closed", "warn")
+            return False
+        self.opened_edges.add(key)
+        ex, ey = gm.cell_center(model, nxt)
+        dist = (ex - x) * math.cos(heading) + (ey - y) * math.sin(heading)
+        if front is not None:  # never plan to end closer to a wall than the stop distance
+            dist = min(dist, front - p["stop_distance_m"] - 0.03)
+        self.detail = f"to cell {nxt} ({dist:.2f} m)"
+        if dist <= 0.02:
+            return True
+        moved, blocked = self.driver.forward(dist, on_tof=self._moving_tof)
+        if blocked:
+            self.stats["blocked_moves"] += 1
+            if moved < model.cell / 2:
+                self.blocked_edges.add(key)
+                self.opened_edges.discard(key)
+            self.log(f"Emergency stop after {moved:.2f} m on the way to cell {nxt}", "warn")
+            return False
         return True
 
     def _edge_near_seen(self, sg):
@@ -776,7 +810,7 @@ class Explorer:
             self.plan = {"frontiers": fr, "path": [[round(float(x), 3), round(float(y), 3)] for x, y in path_w],
                          "goal": [round(float(gx), 3), round(float(gy), 3)]}
         self.log(f"Target frontier ({gx:.2f}, {gy:.2f}), path {len(info['path']) * grid.res:.2f} m, "
-                 f"{len(info['frontiers'])} frontier(s) left")
+                 f"{len(info['frontiers'])} frontier(s) left", "debug")
         return info
 
     def _blacklist(self, cells):
@@ -937,7 +971,8 @@ class Explorer:
             # not confirmed during the run: best fit over all the data, for the saved maps
             pts = np.concatenate([a for a, _ in self.wall_pts])
             ang = np.concatenate([b for _, b in self.wall_pts])
-            final = gm.detect(pts, ang, self.p, model, final=True)
+            final = gm.detect(pts, ang, self.p, model, final=True,
+                              anchor=self.start_pose[:2] if self.p["grid_start_centered"] else None)
             if final is not None and final.cell_trusted:
                 with self.lock:
                     model, edges = final, gm.classify_edges(final, grid, classes, self.p)
