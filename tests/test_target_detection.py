@@ -284,10 +284,62 @@ class LightingTests(unittest.TestCase):
                                  ("yellow", "circle")])
 
 
+class ShapeMatchingTests(unittest.TestCase):
+    def test_rectangle_target_accepts_square_cards(self):
+        from target_detection import shape_matches
+        self.assertTrue(shape_matches("rectangle", "square"))
+        self.assertTrue(shape_matches("rectangle", "rectangle"))
+        self.assertFalse(shape_matches("square", "rectangle"))
+        self.assertTrue(shape_matches("any", "triangle"))
+        self.assertFalse(shape_matches("circle", "square"))
+
+    def test_rectangle_orientation_matching(self):
+        from target_detection import shape_matches
+        self.assertTrue(shape_matches("rectangle_v", "rectangle", "vertical"))
+        self.assertFalse(shape_matches("rectangle_v", "rectangle", "horizontal"))
+        self.assertTrue(shape_matches("rectangle_h", "rectangle", "horizontal"))
+        self.assertFalse(shape_matches("rectangle_h", "rectangle", "vertical"))
+        self.assertFalse(shape_matches("rectangle_v", "square", ""))     # a square is neither
+        self.assertTrue(shape_matches("rectangle", "rectangle", "horizontal"))
+
+    def test_portrait_and_landscape_cards_are_separated(self):
+        img = background(seed=11)
+        draw_shape(img, "rectangle", "green", (300, 360), 60, angle=90)   # portrait
+        draw_shape(img, "rectangle", "green", (650, 360), 60, angle=0)    # landscape
+        draw_shape(img, "square", "green", (1000, 360), 55)               # square
+        wanted = {"rectangle_v": [300], "rectangle_h": [650],
+                  "rectangle": [300, 650, 1000], "square": [1000]}
+        for shape, xs in wanted.items():
+            with self.subTest(shape=shape):
+                settings = make_settings(color="green", shape=shape, size_m=0.07)
+                targets = [d for d in ColorShapeDetector(settings).detect(img)[0] if d.is_target]
+                self.assertEqual(sorted(round(d.center[0] / 50) * 50 for d in targets), xs)
+
+    def test_leaning_card_still_counts_as_portrait(self):
+        settings = make_settings(color="green", shape="rectangle_v", size_m=0.07)
+        for lean in (0, 15, 30):
+            with self.subTest(lean=lean):
+                img = background(seed=12)
+                draw_shape(img, "rectangle", "green", (640, 360), 60, angle=90 - lean)
+                targets = [d for d in ColorShapeDetector(settings).detect(img)[0] if d.is_target]
+                self.assertEqual(len(targets), 1, f"leaning {lean} deg was not seen as portrait")
+                self.assertEqual(targets[0].orientation, "vertical")
+
+    def test_near_square_card_is_engaged_for_a_rectangle_target(self):
+        settings = make_settings(color="yellow", shape="rectangle", size_m=0.07)
+        detector = ColorShapeDetector(settings)
+        img = background(seed=6)
+        # A card whose sides are nearly equal (classified "square").
+        draw_shape(img, "square", "yellow", (640, 360), 60)
+        targets = [d for d in detector.detect(img)[0] if d.is_target]
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].shape, "square")
+
+
 class LearnColorTests(unittest.TestCase):
     def test_click_learns_unlisted_colour(self):
         # Purple is not in the default ranges; clicking it teaches "blue" to mean this card.
-        settings = make_settings(color="blue", shape="any")
+        settings = make_settings(color="blue", shape="any", size_m=0.2)
         detector = ColorShapeDetector(settings)
         img = background(seed=3)
         draw_shape(img, "square", rgb(120, 40, 150), (640, 360), 150)
@@ -300,7 +352,7 @@ class LearnColorTests(unittest.TestCase):
         self.assertEqual(settings["detection"]["colors"]["blue"], ranges)
 
     def test_learning_red_wraps_hue(self):
-        detector = ColorShapeDetector(make_settings(color="red", shape="any"))
+        detector = ColorShapeDetector(make_settings(color="red", shape="any", size_m=0.2))
         img = background(seed=4)
         draw_shape(img, "circle", rgb(150, 10, 25), (640, 360), 150)   # hue ~ 177, next to the wrap
         ranges = detector.learn_color(img, 640, 360)

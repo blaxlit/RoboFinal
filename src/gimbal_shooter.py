@@ -18,6 +18,7 @@ Keys (click the video window first):
     SPACE fire         T auto-track on/off     F auto-fire on/off
     X next colour      Z next shape            C calibrate distance
     [ / ] pitch trim   , / . yaw trim          R recenter gimbal   ESC quit
+    G patrol along the wall (auto drive, stops to shoot)   N measure card size
     CLICK a card: learn its colour for this room's light
     M show colour mask P save raw camera frame (data/captures/)
 """
@@ -60,9 +61,9 @@ DEFAULT_SHOOTER_SETTINGS = {
         "max_pitch_speed": 120.0,
         "min_yaw_speed": 6.0,        # friction compensation
         "min_pitch_speed": 8.0,
-        "hold_enter_ratio": 0.35,     # stop when error < ratio * lock tolerance (hysteresis)
+        "hold_enter_ratio": 0.5,     # stop when error < ratio * lock tolerance (hysteresis)
         "max_accel_dps2": 600.0,     # smooth speed changes
-        "target_smoothing": 0.35,    # EMA on the target's absolute angle (lower = steadier)
+        "target_smoothing": 0.25,    # EMA on the target's absolute angle (lower = steadier)
         "refine_delay_s": 0.5,       # after stopping, correct a small leftover error once
         "reseed_deg": 4.0,           # jump bigger than this = new position, no smoothing
         "camera_latency_s": 0.20,    # image delay over Wi-Fi; used to look up past gimbal angle
@@ -71,7 +72,7 @@ DEFAULT_SHOOTER_SETTINGS = {
         # [distance_m, extra pitch up deg]: camera-above-barrel parallax + ball drop.
         "pitch_compensation": [[0.5, 5.0], [1.0, 3.0], [2.0, 2.0], [3.0, 2.2]],
         "lock_tolerance_ratio": 0.4, # of the target's angular radius
-        "min_lock_tolerance_deg": 0.6,
+        "min_lock_tolerance_deg": 1.0,
         "max_lock_tolerance_deg": 2.0,
         "lock_frames": 3,
         "max_lock_rate_dps": 8.0,    # error must be settling slower than this to fire
@@ -79,9 +80,30 @@ DEFAULT_SHOOTER_SETTINGS = {
     },
     "firing": {
         "auto_fire": False,          # safety: press F (or --auto-fire) to arm
-        "cooldown_s": 0.6,
+        "cooldown_s": 1.5,           # time between shots: let the picture settle and re-detect
         "max_shots_per_target": 3,
         "fire_times": 1,             # balls per trigger pull
+    },
+    "knockdown": {
+        "enabled": True,
+        "fall_pitch_deg": 2.5,       # card centre dropping this much = it fell over
+        "fall_missing_frames": 8,    # ...or it simply disappeared after being shot
+        "blacklist_seconds": 30.0,   # ignore that spot afterwards (do not re-shoot a downed card)
+        "blacklist_radius_deg": 4.0,
+        # Firing shakes the gimbal and blurs the picture, so the card is often missed
+        # for a few frames. Nothing is judged until this long after the shot.
+        "settle_seconds": 1.2,
+        "skip_after_max_shots": True,  # card survived its ammo budget: leave it, try another
+    },
+    "patrol": {
+        "enabled": False,            # press G to start; WASD always overrides
+        "speed_mps": 0.25,           # sideways speed along the wall
+        "wall_distance_mm": 1200,    # hold this distance to the wall (front ToF)
+        "distance_kp": 0.0006,       # m/s per mm of distance error
+        "max_approach_mps": 0.15,
+        "min_distance_mm": 1000,     # never get closer than this, patrol or manual
+        "leg_seconds": 8.0,          # reverse direction after this long
+        "stop_to_shoot": True,
     },
     "controls": {
         "keyboard_backend": "auto",  # auto | pynput | opencv
@@ -140,6 +162,27 @@ def validate_shooter_settings(s):
              "firing.max_shots_per_target must be an integer >= 1")
     _require(isinstance(fire["fire_times"], int) and 1 <= fire["fire_times"] <= 8,
              "firing.fire_times must be an integer 1-8")
+
+    kd, pat = s["knockdown"], s["patrol"]
+    _require(isinstance(kd["enabled"], bool) and isinstance(kd["skip_after_max_shots"], bool),
+             "knockdown.enabled and knockdown.skip_after_max_shots must be true/false")
+    for key in ("fall_pitch_deg", "blacklist_seconds", "blacklist_radius_deg", "settle_seconds"):
+        _require(_is_number(kd[key]) and kd[key] >= 0, f"knockdown.{key} must be >= 0")
+    _require(isinstance(kd["fall_missing_frames"], int) and kd["fall_missing_frames"] >= 1,
+             "knockdown.fall_missing_frames must be an integer >= 1")
+
+    _require(isinstance(pat["enabled"], bool) and isinstance(pat["stop_to_shoot"], bool),
+             "patrol.enabled and patrol.stop_to_shoot must be true/false")
+    _require(_is_number(pat["speed_mps"]) and 0 < pat["speed_mps"] <= 1.0,
+             "patrol.speed_mps must be in (0, 1]")
+    _require(_is_number(pat["max_approach_mps"]) and 0 <= pat["max_approach_mps"] <= 1.0,
+             "patrol.max_approach_mps must be in [0, 1]")
+    _require(_is_number(pat["wall_distance_mm"]) and pat["wall_distance_mm"] > 0,
+             "patrol.wall_distance_mm must be > 0")
+    _require(_is_number(pat["min_distance_mm"]) and 0 < pat["min_distance_mm"] < pat["wall_distance_mm"],
+             "patrol.min_distance_mm must be > 0 and below patrol.wall_distance_mm")
+    _require(_is_number(pat["distance_kp"]) and pat["distance_kp"] >= 0, "patrol.distance_kp must be >= 0")
+    _require(_is_number(pat["leg_seconds"]) and pat["leg_seconds"] > 0, "patrol.leg_seconds must be > 0")
 
     _require(ctl["keyboard_backend"] in ("auto", "pynput", "opencv"),
              "controls.keyboard_backend must be auto, pynput or opencv")
@@ -356,6 +399,160 @@ class FireControl:
             self.shots_at_track += 1
 
 
+class Engagement:
+    """Knocks one card down, then moves on.
+
+    A card that has been shot is watched for a moment: if its centre drops, or it
+    disappears, or it ends up lying down (the detector then refuses it), it counts
+    as DOWN. Its direction is remembered for a while so the gimbal does not go
+    back to the empty spot or shoot a card that is already falling.
+    """
+
+    def __init__(self, settings):
+        self.cfg = settings["knockdown"]
+        self.reset()
+        self.downed = 0
+
+    def reset(self):
+        self.track_id = None
+        self.best_pitch = None        # highest (absolute) pitch seen for this card
+        self.shot_at = None
+        self.missing = 0
+        self.last_bearing = None      # (yaw, pitch) in gimbal ground angles
+        self.blacklist = []           # [(yaw, pitch, expiry_time)]
+
+    # ---------------------------------------------------------------- blacklist
+    def is_blacklisted(self, yaw, pitch, now):
+        self.blacklist = [b for b in self.blacklist if b[2] > now]
+        radius = self.cfg["blacklist_radius_deg"]
+        return any(abs(yaw - by) <= radius and abs(pitch - bp) <= radius
+                   for by, bp, _ in self.blacklist)
+
+    def clear_blacklist(self):
+        """The robot drove somewhere else, so old directions mean nothing."""
+        self.blacklist = []
+
+    # ---------------------------------------------------------------- engagement
+    def update(self, track, bearing, now, visible):
+        """Feed one frame. Returns True when the engaged card has just been declared down.
+
+        ``track`` may be None: the tracker gives up on a vanished card sooner than
+        this watcher does, and a card that disappears right after being shot is
+        exactly the case we are looking for.
+        """
+        if not self.cfg["enabled"]:
+            return False
+        if track is not None and track.track_id != self.track_id:
+            self.track_id, self.best_pitch, self.shot_at, self.missing = track.track_id, None, None, 0
+        if visible and bearing is not None:
+            self.last_bearing = bearing
+            self.missing = 0
+            self.best_pitch = bearing[1] if self.best_pitch is None else max(self.best_pitch, bearing[1])
+        else:
+            self.missing += 1
+
+        if self.shot_at is None:
+            return False
+        if now - self.shot_at < self.cfg["settle_seconds"]:
+            # Recoil shake / motion blur right after the shot: frames missed here
+            # mean nothing, so they must not count as "the card is gone".
+            self.missing = 0
+            return False
+        dropped = (visible and bearing is not None and self.best_pitch is not None
+                   and self.best_pitch - bearing[1] >= self.cfg["fall_pitch_deg"])
+        vanished = self.missing >= self.cfg["fall_missing_frames"]
+        if dropped or vanished:
+            self.mark_down(now, reason="fell over" if dropped else "gone")
+            return True
+        return False
+
+    def record_shot(self, now):
+        self.shot_at = now
+        self.missing = 0
+
+    def give_up(self, now):
+        """The card took every shot in its budget and is still standing: skip it."""
+        if self.last_bearing is not None:
+            self.blacklist.append((self.last_bearing[0], self.last_bearing[1],
+                                   now + self.cfg["blacklist_seconds"]))
+        print("Card still standing after all shots - skipping it and looking for another.")
+        self.reset_current()
+
+    def mark_down(self, now, reason="down"):
+        if self.last_bearing is not None:
+            self.blacklist.append((self.last_bearing[0], self.last_bearing[1],
+                                   now + self.cfg["blacklist_seconds"]))
+        self.downed += 1
+        print(f"Target down ({reason}) - {self.downed} total. Looking for the next card.")
+        self.reset_current()
+
+    def reset_current(self):
+        self.track_id = None
+        self.best_pitch = None
+        self.shot_at = None
+        self.missing = 0
+        self.last_bearing = None
+
+
+def limit_forward(chassis, front_mm, min_distance_mm):
+    """Never drive into the wall: forward motion is cut (and turned into a small
+    back-off) when the front ToF says we are closer than min_distance_mm.
+    Backing up and strafing sideways stay available."""
+    x, y, z = chassis
+    if front_mm is None or front_mm <= 0 or front_mm >= min_distance_mm:
+        return (x, y, z), False
+    return (min(x, 0.0), y, z), True
+
+
+class PatrolController:
+    """Drives sideways along the wall, holding its distance with the front ToF,
+    and stops while a card is being engaged."""
+
+    def __init__(self, settings):
+        self.cfg = settings["patrol"]
+        self.enabled = self.cfg["enabled"]
+        self.direction = 1.0
+        self.leg_started = None
+        self.state = "off"
+
+    def toggle(self, now):
+        self.enabled = not self.enabled
+        self.leg_started = now
+        self.state = "scanning" if self.enabled else "off"
+        return self.enabled
+
+    def update(self, now, front_mm, engaged):
+        """Return (x, y, z) chassis speeds."""
+        if not self.enabled:
+            self.state = "off"
+            return 0.0, 0.0, 0.0
+        if engaged and self.cfg["stop_to_shoot"]:
+            self.state = "holding (target)"
+            return 0.0, 0.0, 0.0
+        if self.leg_started is None:
+            self.leg_started = now
+        if now - self.leg_started >= self.cfg["leg_seconds"]:
+            self.direction *= -1.0
+            self.leg_started = now
+
+        x = 0.0
+        if front_mm is not None and front_mm > 0:
+            if front_mm < self.cfg["min_distance_mm"] * 0.8:
+                x = -self.cfg["max_approach_mps"]          # much too close: back off
+                self.state = "backing off"
+            elif front_mm < self.cfg["min_distance_mm"]:
+                x = -self.cfg["max_approach_mps"] * 0.5     # inside the safety margin
+                self.state = "keeping 1 m"
+            else:
+                error = front_mm - self.cfg["wall_distance_mm"]
+                x = max(-self.cfg["max_approach_mps"],
+                        min(self.cfg["max_approach_mps"], self.cfg["distance_kp"] * error))
+                self.state = "scanning"
+        else:
+            self.state = "scanning (no ToF)"
+        return x, self.direction * self.cfg["speed_mps"], 0.0
+
+
 # ==============================================================================
 # 4. Keyboard (held keys + one-shot key presses)
 # ==============================================================================
@@ -505,7 +702,10 @@ class RobotIO:
         self.connection = connection
         self.settings = settings
         self.ep_robot = None
-        self.angles = collections.deque(maxlen=200)  # (t, pitch, yaw)
+        self.angles = collections.deque(maxlen=200)  # (t, pitch, yaw) in GROUND angles
+        self.distance_mm = None
+        self.distance_time = 0.0
+        self._distance_sub = False
         self._fire_queue = queue.Queue(maxsize=1)
         self._fire_thread = None
         self._stream = False
@@ -528,6 +728,11 @@ class RobotIO:
         self._stream = True
         self.ep_robot.gimbal.sub_angle(freq=50, callback=self._on_angle)
         self._angle_sub = True
+        try:
+            self.ep_robot.sensor.sub_distance(freq=10, callback=self._on_distance)
+            self._distance_sub = True
+        except Exception as error:      # ToF is only needed for patrol mode
+            print(f"[sensor] front distance unavailable: {error}")
         self.recenter()
 
         self.water_fire = getattr(blaster, "WATER_FIRE", "water")
@@ -536,8 +741,21 @@ class RobotIO:
         print("Robot ready.")
 
     def _on_angle(self, info):
-        pitch, yaw = info[0], info[1]
+        # (pitch, yaw, pitch_ground, yaw_ground): the ground angles do not jump when
+        # the chassis turns, so the target estimate survives driving.
+        pitch, yaw = (info[2], info[3]) if len(info) >= 4 else (info[0], info[1])
         self.angles.append((time.monotonic(), float(pitch), float(yaw)))
+
+    def _on_distance(self, info):
+        if isinstance(info, (list, tuple)) and info:
+            self.distance_mm = float(info[0])
+            self.distance_time = time.monotonic()
+
+    def front_distance_mm(self):
+        """Front ToF reading, or None when it is missing or stale."""
+        if self.distance_mm is None or time.monotonic() - self.distance_time > 1.0:
+            return None
+        return self.distance_mm
 
     def gimbal_angle(self, at_time=None):
         """(pitch, yaw) now, or at a past monotonic time (latency compensation)."""
@@ -606,6 +824,7 @@ class RobotIO:
             lambda: self.ep_robot.gimbal.drive_speed(pitch_speed=0, yaw_speed=0),
             lambda: self._fire_queue.put_nowait(None),
             lambda: self._angle_sub and self.ep_robot.gimbal.unsub_angle(),
+            lambda: self._distance_sub and self.ep_robot.sensor.unsub_distance(),
             lambda: self._stream and self.ep_robot.camera.stop_video_stream(),
             lambda: self.ep_robot.close(),
         ]
@@ -650,6 +869,9 @@ class OfflineIO:
     def gimbal_rate(self, window_s=0.15):
         return 0.0
 
+    def front_distance_mm(self):
+        return None
+
     def _log(self, name, text):
         if self.verbose and self.last_print.get(name) != text:
             self.last_print[name] = text
@@ -693,15 +915,17 @@ def draw_hud(frame, st):
         (f"err yaw {st['yaw_err']}  pitch {st['pitch_err']}  tol {st['tol']}", (255, 255, 255)),
         (f"pitch comp {st['comp']}  trim yaw {st['yaw_trim']:+.1f} pitch {st['pitch_trim']:+.1f}",
          (255, 255, 255)),
-        (f"shots: {st['shots']}   fps: {st['fps']:.0f}   keys: {st['keys']}", (200, 200, 200)),
+        (f"shots: {st['shots']}   cards down: {st['downed']}   patrol: {st['patrol']}", (200, 200, 200)),
+        (f"fps: {st['fps']:.0f}   keys: {st['keys']}   front: {st['front']} (min {st['min_front']:.0f} mm)",
+         (0, 80, 255) if st["too_close"] else (200, 200, 200)),
         (f"chassis x{st['cx']:+.2f} y{st['cy']:+.2f} z{st['cz']:+.0f}  gimbal y{st['gy']:+.0f} p{st['gp']:+.0f}",
          (200, 200, 200)),
     ]
     for i, (text, color) in enumerate(lines):
         _text(frame, text, (18, 34 + i * 26), color, 0.55, 1)
 
-    help_text = ("WASD move  QE rotate  IJKL gimbal  SPACE fire  T track  F auto-fire  X/Z target  "
-                 "CLICK learn colour  M mask  P save  ESC quit")
+    help_text = ("WASD move  QE rotate  IJKL gimbal  SPACE fire  T track  F auto-fire  G patrol  "
+                 "X/Z target  N card size  CLICK learn colour  M mask  ESC quit")
     _text(frame, help_text, (12, h - 14), (220, 220, 220), 0.5, 1)
 
     if st["fire_flash"]:
@@ -717,6 +941,7 @@ def parse_args():
     parser.add_argument("--shape", choices=TARGET_SHAPES, help="target shape (overrides config)")
     parser.add_argument("--size", type=float, help="real target size in metres (overrides config)")
     parser.add_argument("--auto-fire", action="store_true", help="start with auto-fire armed")
+    parser.add_argument("--patrol", action="store_true", help="start patrolling along the wall")
     parser.add_argument("--headless", action="store_true", help="no window/keyboard (offline tests)")
     parser.add_argument("--max-frames", type=int, default=0, help="stop after N frames (0 = no limit)")
     parser.add_argument("--save", help="save annotated output (.png = last frame, .mp4/.avi = video)")
@@ -738,6 +963,10 @@ def apply_overrides(config, args):
         firing = ts.setdefault("firing", {}) or {}
         ts["firing"] = firing
         firing["auto_fire"] = True
+    if args.patrol:
+        patrol_cfg = ts.setdefault("patrol", {}) or {}
+        ts["patrol"] = patrol_cfg
+        patrol_cfg["enabled"] = True
 
 
 def run(args):
@@ -751,6 +980,8 @@ def run(args):
     tracker = TargetTracker(settings)
     aim = AimController(settings)
     fire_ctl = FireControl(settings)
+    engagement = Engagement(settings)
+    patrol = PatrolController(settings)
     ctl = settings["controls"]
     tgt = settings["target"]
     colors = list(settings["detection"]["colors"])
@@ -778,6 +1009,7 @@ def run(args):
     frames = processed = 0
     fps, fps_time = 0.0, time.monotonic()
     fire_flash_until = 0.0
+    last_close_warning = -1e9
     gimbal_cmd = (0.0, 0.0)
     chassis_cmd = (0.0, 0.0, 0.0)
 
@@ -810,6 +1042,19 @@ def run(args):
 
             # ---- detection + tracking
             detections, masks = detector.detect(frame)
+
+            # Absolute direction of each candidate, so cards already knocked down
+            # are not engaged again while the robot stands still.
+            cap_pitch, cap_yaw = io.gimbal_angle(capture_time)
+            def bearing_of(detection):
+                d_yaw, d_pitch = pixel_to_angles(detection.center[0], detection.center[1],
+                                                 frame.shape[1], frame.shape[0], focal_px)
+                return cap_yaw + d_yaw, cap_pitch + d_pitch
+            for detection in detections:
+                if detection.is_target and engagement.is_blacklisted(*bearing_of(detection), now=now):
+                    detection.is_target = False
+                    detection.reject_reason = "already down"
+
             track = tracker.update(detections, frame.shape)
             visible = tracker.visible
 
@@ -855,6 +1100,20 @@ def run(args):
                     elif key in (",", "."):
                         settings["aiming"]["yaw_offset_deg"] += 0.2 if key == "." else -0.2
                         print(f"yaw_offset_deg = {settings['aiming']['yaw_offset_deg']:+.1f}")
+                    elif key == "g":
+                        running = patrol.toggle(now)
+                        print(f"Patrol {'ON - driving along the wall' if running else 'OFF'}")
+                    elif key == "n":
+                        if visible and track.detection.size_px > 1:
+                            d_cal = settings["camera"]["calibration_distance_m"]
+                            measured = d_cal * track.detection.size_px / focal_px
+                            tgt["size_m"] = round(measured, 3)
+                            tracker.reset()
+                            aim.reset()
+                            print(f"Card size measured at {d_cal} m: size_m = {tgt['size_m']} "
+                                  "(put it in config target_shooting.target.size_m)")
+                        else:
+                            print(f"Point at one card from {settings['camera']['calibration_distance_m']} m first.")
                     elif key == "m":
                         show_mask = not show_mask
                     elif key == "p":
@@ -882,10 +1141,21 @@ def run(args):
 
             held = keyboard.held if keyboard else (lambda k: False)
 
-            # ---- chassis (WASD + QE)
+            # ---- chassis (WASD + QE, or patrol when nothing is held)
             v, rot = ctl["chassis_speed_mps"], ctl["chassis_rotate_dps"]
             new_chassis = ((held("w") - held("s")) * v, (held("d") - held("a")) * v,
                            (held("e") - held("q")) * rot)
+            if new_chassis == (0.0, 0.0, 0.0) and patrol.enabled:
+                engaged = visible and track is not None and track.confirmed
+                new_chassis = patrol.update(now, io.front_distance_mm(), engaged)
+            new_chassis, too_close = limit_forward(new_chassis, io.front_distance_mm(),
+                                                   settings["patrol"]["min_distance_mm"])
+            if too_close and now - last_close_warning > 2.0:
+                last_close_warning = now
+                print(f"Too close to the wall ({io.front_distance_mm():.0f} mm) - forward blocked.")
+            if new_chassis != (0.0, 0.0, 0.0):
+                # The robot moved, so remembered directions of downed cards are stale.
+                engagement.clear_blacklist()
             if chassis_limiter.due(new_chassis, now):
                 chassis_cmd = new_chassis
                 io.drive_chassis(*chassis_cmd)
@@ -923,9 +1193,26 @@ def run(args):
                     io.fire(settings["firing"]["fire_times"]):
                 fire_ctl.record_shot(now, auto=auto_shot)
                 fire_flash_until = now + 0.3
+                engagement.record_shot(now)
                 dist = f"{track.distance_m:.2f} m" if visible and track.distance_m else "-"
                 print(f"FIRE ({'auto' if auto_shot else 'manual'}) #{fire_ctl.total_shots} "
                       f"target={tgt['color']} {tgt['shape']} distance={dist}")
+
+            # ---- did the card fall over? then stop shooting it and pick the next one
+            bearing = bearing_of(track.detection) if (visible and track is not None) else None
+            done = engagement.update(track, bearing, now, visible and track is not None)
+            if (not done and settings["knockdown"]["skip_after_max_shots"] and visible
+                    and fire_ctl.auto_fire and track is not None
+                    and track.track_id == fire_ctl.track_id
+                    and fire_ctl.shots_at_track >= settings["firing"]["max_shots_per_target"]
+                    and now - fire_ctl.last_shot >= settings["knockdown"]["settle_seconds"]):
+                engagement.give_up(now)
+                done = True
+            if done:
+                tracker.reset()
+                aim.reset()
+                track, visible, locked = None, False, False
+                stop_gimbal(now)
 
             # ---- draw
             if track is None:
@@ -964,6 +1251,9 @@ def run(args):
                 "comp": fmt("comp"), "yaw_trim": settings["aiming"]["yaw_offset_deg"],
                 "pitch_trim": settings["aiming"]["pitch_offset_deg"],
                 "shots": fire_ctl.total_shots, "fps": fps,
+                "downed": engagement.downed, "patrol": patrol.state,
+                "front": (f"{io.front_distance_mm():.0f} mm" if io.front_distance_mm() else "-"),
+                "min_front": settings["patrol"]["min_distance_mm"], "too_close": too_close,
                 "keys": keyboard.name if keyboard else "none",
                 "cx": chassis_cmd[0], "cy": chassis_cmd[1], "cz": chassis_cmd[2],
                 "gy": gimbal_cmd[0], "gp": gimbal_cmd[1],

@@ -54,8 +54,8 @@ target_shooting:
     swap_red_blue: false          # set true if red objects are detected as blue
 
   detection:
-    process_width: 640            # candidate search width (refined at full resolution)
-    min_area_px: 80               # at process_width scale; lower = see farther, more noise
+    process_width: 960            # candidate search width (refined at full resolution)
+    min_area_px: 40               # at process_width scale; lower = see farther, more noise
     max_area_ratio: 0.6
     min_solidity: 0.85            # rejects ragged / non-convex blobs
     blur_kernel: 5                # odd numbers only
@@ -84,10 +84,21 @@ target_shooting:
 
   target:                         # only objects matching ALL of these are shot
     color: "red"                  # a key from detection.colors
-    shape: "circle"               # circle | square | rectangle | triangle | any
-    size_m: 0.20                  # largest outer dimension (circle diameter / longest side)
+    # circle | square | rectangle | rectangle_v | rectangle_h | triangle | any
+    #   rectangle   = any rectangle (also near-square cards)
+    #   rectangle_v = standing / portrait only   (แนวตั้ง)
+    #   rectangle_h = lying / landscape only     (แนวนอน)
+    shape: "circle"
+    size_m: 0.07                  # real card size (largest dimension); press N to measure it
     min_distance_m: 0.3
     max_distance_m: 3.0
+    # These keep walls, doors and floors out: a card is small (so a wall's size
+    # puts it far outside the distance range), fully inside the frame, and standing.
+    require_fully_visible: true    # ignore anything touching the frame edge
+    # upright_only rejects wide (landscape) cards as well, so only turn it on when
+    # every card in your set is portrait. Fallen cards are handled by "knockdown".
+    upright_only: false
+    upright_tolerance_deg: 45.0    # cards may lean this far and still count
 
   tracking:
     confirm_frames: 3             # consecutive frames before the target is trusted
@@ -106,9 +117,9 @@ target_shooting:
     max_pitch_speed: 120.0
     min_yaw_speed: 6.0            # overcome gimbal friction
     min_pitch_speed: 8.0
-    hold_enter_ratio: 0.35        # anti-shake: stop at 0.35 x tolerance, restart only above tolerance
+    hold_enter_ratio: 0.5         # anti-shake: stop at 0.5 x tolerance, restart only above tolerance
     max_accel_dps2: 600.0         # anti-shake: smooth speed changes
-    target_smoothing: 0.35        # anti-shake: lower = steadier but slower to follow a moving target
+    target_smoothing: 0.25        # anti-shake: lower = steadier but slower to follow a moving target
     refine_delay_s: 0.5           # after stopping, fix a small leftover error once the image is steady
     reseed_deg: 4.0
     camera_latency_s: 0.20        # Wi-Fi video delay; if the aim still overshoots, try 0.25-0.30
@@ -120,15 +131,34 @@ target_shooting:
       - [2.0, 2.0]
       - [3.0, 2.2]
     lock_tolerance_ratio: 0.4     # fraction of the target's angular radius
-    min_lock_tolerance_deg: 0.6
+    min_lock_tolerance_deg: 1.0   # small cards: tighter than this is just detection noise
     max_lock_tolerance_deg: 2.0
     lock_frames: 3
     max_lock_rate_dps: 8.0        # only fire once the aim has settled
     pitch_limits_deg: [-20.0, 30.0]
 
+  knockdown:                      # knock a card over, then move to the next one
+    enabled: true
+    fall_pitch_deg: 2.5           # card centre dropping this much = it fell
+    fall_missing_frames: 8        # ...or it vanished after being shot
+    blacklist_seconds: 30.0       # ignore that spot afterwards (no shooting a downed card)
+    blacklist_radius_deg: 4.0
+    settle_seconds: 1.2           # ignore recoil shake/blur: judge only this long after a shot
+    skip_after_max_shots: true    # card survived all its shots: skip it and try another
+
+  patrol:                         # auto-drive along the wall (key G, or --patrol)
+    enabled: false
+    speed_mps: 0.25               # sideways speed along the wall
+    wall_distance_mm: 1200        # hold this distance using the front ToF
+    distance_kp: 0.0006
+    max_approach_mps: 0.15
+    min_distance_mm: 1000         # keep at least 1 m from the wall (also blocks manual forward)
+    leg_seconds: 8.0              # reverse direction after this long
+    stop_to_shoot: true           # stand still while aiming and firing
+
   firing:
     auto_fire: false              # safety default; press F or use --auto-fire
-    cooldown_s: 0.6
+    cooldown_s: 1.5               # seconds between shots (time to settle and re-detect)
     max_shots_per_target: 3
     fire_times: 1                 # water balls per shot
 

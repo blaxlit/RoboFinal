@@ -30,7 +30,10 @@ import cv2
 import numpy as np
 
 SHAPES = ("circle", "square", "rectangle", "triangle")
-TARGET_SHAPES = SHAPES + ("any",)
+# Rectangles can be picked by orientation: rectangle_v = standing/portrait,
+# rectangle_h = lying/landscape, rectangle = either.
+TARGET_SHAPES = ("circle", "square", "rectangle", "rectangle_v", "rectangle_h", "triangle", "any")
+VERTICAL, HORIZONTAL = "vertical", "horizontal"
 
 # ==============================================================================
 # 1. Settings (defaults + validation)
@@ -46,9 +49,9 @@ DEFAULT_SETTINGS = {
         "swap_red_blue": False,
     },
     "detection": {
-        "process_width": 640,
-        "min_area_px": 80,         # contour area at process_width scale
-        "max_area_ratio": 0.6,     # reject blobs covering most of the frame
+        "process_width": 960,
+        "min_area_px": 40,         # contour area at process_width scale
+        "max_area_ratio": 0.25,    # a blob bigger than this is a wall/door, not a card
         "min_solidity": 0.85,      # area / convex hull area
         "blur_kernel": 5,
         "morph_kernel": 5,
@@ -78,9 +81,17 @@ DEFAULT_SETTINGS = {
     "target": {
         "color": "red",
         "shape": "circle",
-        "size_m": 0.20,            # largest outer dimension of the real target
+        "size_m": 0.07,            # largest outer dimension of the real card
         "min_distance_m": 0.3,
         "max_distance_m": 3.0,
+        # Walls, doors and floors are rejected by these: a card is small, fully
+        # visible, and standing (a knocked-over card lies flat).
+        "require_fully_visible": True,   # ignore anything touching the frame edge
+        # Only for card sets that are ALL portrait: it rejects wide (landscape)
+        # cards too, so it is off by default. Knocked-over cards are handled by
+        # the knockdown watcher in gimbal_shooter.py instead.
+        "upright_only": False,
+        "upright_tolerance_deg": 45.0,   # cards may lean; 90 deg = lying on its side
     },
     "tracking": {
         "confirm_frames": 3,       # hits needed before the target is trusted
@@ -177,6 +188,10 @@ def validate_detection_settings(settings):
     _require(_is_number(tgt["min_distance_m"]) and _is_number(tgt["max_distance_m"])
              and 0 <= tgt["min_distance_m"] < tgt["max_distance_m"],
              "target.min_distance_m must be >= 0 and < target.max_distance_m")
+    _require(isinstance(tgt["require_fully_visible"], bool) and isinstance(tgt["upright_only"], bool),
+             "target.require_fully_visible and target.upright_only must be true/false")
+    _require(_is_number(tgt["upright_tolerance_deg"]) and 0 < tgt["upright_tolerance_deg"] <= 90,
+             "target.upright_tolerance_deg must be in (0, 90]")
 
     _require(isinstance(trk["confirm_frames"], int) and trk["confirm_frames"] >= 1,
              "tracking.confirm_frames must be an integer >= 1")
@@ -199,6 +214,24 @@ def build_detection_settings(config=None):
 # ==============================================================================
 # 2. Geometry helpers
 # ==============================================================================
+def shape_matches(wanted, found, orientation=""):
+    """Does a detected shape match the selected target shape?
+
+    'rectangle' accepts squares too (a card whose sides are nearly equal would
+    otherwise flip in and out), while 'rectangle_v' / 'rectangle_h' pick only
+    portrait / landscape rectangles - squares are neither.
+    """
+    if wanted == "any":
+        return True
+    if wanted == "rectangle":
+        return found in ("rectangle", "square")
+    if wanted == "rectangle_v":
+        return found == "rectangle" and orientation == VERTICAL
+    if wanted == "rectangle_h":
+        return found == "rectangle" and orientation == HORIZONTAL
+    return found == wanted
+
+
 def focal_length_from_fov(image_width, horizontal_fov_deg):
     return (image_width / 2.0) / math.tan(math.radians(horizontal_fov_deg) / 2.0)
 
@@ -230,6 +263,8 @@ class Detection:
     size_px: float                   # largest outer dimension in pixels
     circularity: float
     clipped: bool                    # touches the image border (partial view)
+    tilt_deg: float = 0.0            # long axis away from vertical (90 = lying down)
+    orientation: str = ""            # "vertical" / "horizontal" for rectangles
     distance_m: Optional[float] = None
     is_target: bool = False
     reject_reason: str = ""
@@ -458,10 +493,23 @@ class ColorShapeDetector:
                 shape, circularity = self.classify_shape(contour, area)
                 x, y, w, h = cv2.boundingRect(contour)
                 clipped = x <= border or y <= border or x + w >= full_w - border or y + h >= full_h - border
+                (_, (rect_w, rect_h), rect_angle) = cv2.minAreaRect(contour)  # noqa: E501
                 if shape == "circle" and len(contour) >= 5:
                     size_px = max(cv2.fitEllipse(contour)[1])
                 else:
-                    size_px = max(cv2.minAreaRect(contour)[1])
+                    size_px = max(rect_w, rect_h)
+                # Angle of the long side away from vertical (0 = standing, 90 = lying flat).
+                # Taken from the box corners: minAreaRect's own angle is ambiguous.
+                box = cv2.boxPoints(((0, 0), (rect_w, rect_h), rect_angle))
+                edges = [(box[i], box[(i + 1) % 4]) for i in range(4)]
+                (p0, p1) = max(edges, key=lambda e: (e[1][0] - e[0][0]) ** 2 + (e[1][1] - e[0][1]) ** 2)
+                long_axis = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+                short, long_side = min(rect_w, rect_h), max(rect_w, rect_h)
+                # Only an elongated shape has a meaningful tilt; a square card that
+                # falls over looks squashed (elongated) from the robot's view.
+                elongated = long_side > 1.15 * max(short, 1e-6)
+                tilt = abs((long_axis % 180.0) - 90.0) if elongated else 0.0
+                orientation = ("" if not elongated else VERTICAL if tilt < 45.0 else HORIZONTAL)
 
                 detection = Detection(
                     color=color,
@@ -473,16 +521,24 @@ class ColorShapeDetector:
                     size_px=size_px,
                     circularity=circularity,
                     clipped=clipped,
+                    tilt_deg=tilt,
+                    orientation=orientation,
                 )
 
                 color_ok = color == tgt["color"]
-                shape_ok = tgt["shape"] == "any" or shape == tgt["shape"]
+                shape_ok = shape_matches(tgt["shape"], shape, orientation)
                 if color_ok and shape_ok:
                     detection.distance_m = estimate_distance(detection.size_px, tgt["size_m"], focal_px)
+                    lying = shape in ("rectangle", "square") and tilt > tgt["upright_tolerance_deg"]
                     if detection.distance_m is None:
                         detection.reject_reason = "no distance"
                     elif not tgt["min_distance_m"] <= detection.distance_m <= tgt["max_distance_m"]:
+                        # A wall or door fills the frame -> "distance" comes out far too small.
                         detection.reject_reason = "out of range"
+                    elif tgt["require_fully_visible"] and clipped:
+                        detection.reject_reason = "cut off by frame"
+                    elif tgt["upright_only"] and lying:
+                        detection.reject_reason = "lying down"
                     else:
                         detection.is_target = True
                 elif color_ok:
@@ -603,6 +659,8 @@ def draw_detections(frame, detections, track=None):
         cv2.drawContours(frame, [d.contour], -1, (0, 255, 0) if d.is_target else base, thickness)
         x, y, bw, bh = d.bbox
         label = f"{d.color} {d.shape}"
+        if d.orientation:
+            label += "-v" if d.orientation == VERTICAL else "-h"
         if d.distance_m is not None:
             label += f" {d.distance_m:.2f}m"
         if d.clipped:

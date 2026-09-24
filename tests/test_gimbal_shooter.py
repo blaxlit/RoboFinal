@@ -6,9 +6,14 @@ controller and fire control against it.
 """
 
 import collections
+import contextlib
+import io
 import math
 import os
+import shutil
 import sys
+import tempfile
+import types
 import unittest
 
 import cv2
@@ -235,6 +240,258 @@ class AntiShakeTests(unittest.TestCase):
         self.assertEqual(int(np.sum(yaw_cmd[1:] * yaw_cmd[:-1] < 0)), 0)
 
 
+class CardVsWallTests(unittest.TestCase):
+    """Cards on stands are engaged; walls, doors, floors and fallen cards are not."""
+
+    def settings(self, **target):
+        base = {"color": "green", "shape": "rectangle", "size_m": 0.07}
+        base.update(target)
+        return gs.build_settings({"target_shooting": {"target": base}})
+
+    def test_wall_sized_colour_is_never_a_target(self):
+        settings = self.settings()
+        detector = ColorShapeDetector(settings)
+        img = background(seed=1)
+        cv2.rectangle(img, (0, 0), (W - 1, 260), (60, 170, 60), -1)      # green wall behind
+        draw_shape(img, "rectangle", "green", (640, 430), 60, angle=90)  # a card on a stand
+        targets = [d for d in detector.detect(img)[0] if d.is_target]
+        self.assertEqual(len(targets), 1)
+        self.assertAlmostEqual(targets[0].center[1], 430, delta=10)
+
+    def test_landscape_card_is_still_a_target(self):
+        """Standing cards come in both orientations; a wide card must not be
+        mistaken for a fallen one (upright_only is off by default)."""
+        detector = ColorShapeDetector(self.settings())
+        img = background(seed=7)
+        draw_shape(img, "rectangle", "green", (500, 380), 60, angle=0)    # landscape
+        draw_shape(img, "rectangle", "green", (800, 380), 60, angle=90)   # portrait
+        targets = [d for d in detector.detect(img)[0] if d.is_target]
+        self.assertEqual(len(targets), 2)
+
+    def test_fallen_card_is_rejected_and_leaning_card_accepted(self):
+        detector = ColorShapeDetector(self.settings(upright_only=True))
+        img = background(seed=2)
+        draw_shape(img, "rectangle", "green", (400, 360), 60, angle=90)   # standing
+        draw_shape(img, "rectangle", "green", (700, 360), 60, angle=65)   # leaning 25 deg
+        draw_shape(img, "rectangle", "green", (1000, 360), 60, angle=0)   # fallen flat
+        by_x = sorted(detector.detect(img)[0], key=lambda d: d.center[0])
+        self.assertEqual([d.is_target for d in by_x], [True, True, False])
+        self.assertEqual(by_x[2].reject_reason, "lying down")
+
+    def test_card_touching_frame_edge_is_rejected(self):
+        detector = ColorShapeDetector(self.settings())
+        img = background(seed=3)
+        draw_shape(img, "rectangle", "green", (8, 360), 60, angle=90)
+        detections, _ = detector.detect(img)
+        self.assertTrue(detections)
+        self.assertFalse(detections[0].is_target)
+        self.assertEqual(detections[0].reject_reason, "cut off by frame")
+
+
+class KnockdownTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = settings_with()
+        self.engagement = gs.Engagement(self.settings)
+
+    def track(self, track_id=1):
+        return type("T", (), {"track_id": track_id})()
+
+    def test_card_that_vanishes_after_a_shot_counts_as_down(self):
+        eng, track = self.engagement, self.track()
+        for t in (0.0, 0.1, 0.2):
+            self.assertFalse(eng.update(track, (10.0, -5.0), t, visible=True))
+        eng.record_shot(0.3)
+        # Still visible right after the shot: not down yet, and not judged during settle.
+        self.assertFalse(eng.update(track, (10.0, -5.0), 0.5, visible=True))
+        settle = self.settings["knockdown"]["settle_seconds"]
+        for i in range(self.settings["knockdown"]["fall_missing_frames"]):
+            down = eng.update(track, (10.0, -5.0), 0.3 + settle + 0.1 + i * 0.05, visible=False)
+        self.assertTrue(down)
+        self.assertEqual(eng.downed, 1)
+
+    def test_card_that_drops_counts_as_down(self):
+        eng, track = self.engagement, self.track()
+        eng.update(track, (10.0, -5.0), 0.0, visible=True)
+        eng.record_shot(0.1)
+        settle = self.settings["knockdown"]["settle_seconds"]
+        self.assertFalse(eng.update(track, (10.0, -5.2), 0.1 + settle - 0.1, visible=True))
+        self.assertTrue(eng.update(track, (10.0, -8.5), 0.1 + settle + 0.1, visible=True))  # fell 3.5 deg
+
+    def test_downed_spot_is_blacklisted_then_expires(self):
+        eng, track = self.engagement, self.track()
+        eng.update(track, (10.0, -5.0), 0.0, visible=True)
+        eng.record_shot(0.1)
+        for i in range(30):
+            eng.update(track, (10.0, -5.0), 0.1 + self.settings["knockdown"]["settle_seconds"] + i * 0.05,
+                       visible=False)
+        self.assertTrue(eng.is_blacklisted(10.5, -5.5, now=5.0))     # same spot: skip it
+        self.assertFalse(eng.is_blacklisted(25.0, -5.0, now=5.0))    # another card: fine
+        later = 5.0 + self.settings["knockdown"]["blacklist_seconds"]
+        self.assertFalse(eng.is_blacklisted(10.5, -5.5, now=later))
+
+    def test_driving_clears_the_blacklist(self):
+        eng = self.engagement
+        eng.last_bearing = (10.0, -5.0)
+        eng.mark_down(0.0)
+        self.assertTrue(eng.is_blacklisted(10.0, -5.0, now=1.0))
+        eng.clear_blacklist()
+        self.assertFalse(eng.is_blacklisted(10.0, -5.0, now=1.0))
+
+    def test_disabled_knockdown_never_declares_down(self):
+        settings = gs.build_settings({"target_shooting": {"knockdown": {"enabled": False}}})
+        eng = gs.Engagement(settings)
+        track = self.track()
+        eng.record_shot(0.0)
+        for i in range(30):
+            self.assertFalse(eng.update(track, (10.0, -5.0), 2.0 + i * 0.05, visible=False))
+
+
+    def test_recoil_shake_right_after_a_shot_is_not_a_knockdown(self):
+        """Firing blurs/shakes the picture: frames missed straight after the shot
+        must not blacklist a card that is still standing."""
+        eng, track = self.engagement, self.track()
+        eng.update(track, (10.0, -5.0), 0.0, visible=True)
+        eng.record_shot(0.1)
+        for i in range(20):        # 20 missed frames, all inside the settle window
+            self.assertFalse(eng.update(track, None, 0.15 + i * 0.04, visible=False))
+        self.assertEqual(eng.downed, 0)
+        # The card is seen again afterwards: still no knockdown, nothing blacklisted.
+        settle = self.settings["knockdown"]["settle_seconds"]
+        self.assertFalse(eng.update(track, (10.0, -5.0), 0.1 + settle + 0.1, visible=True))
+        self.assertFalse(eng.is_blacklisted(10.0, -5.0, now=5.0))
+
+
+    def test_give_up_blacklists_a_card_that_will_not_fall(self):
+        eng = self.engagement
+        eng.update(self.track(), (10.0, -5.0), 0.0, visible=True)
+        eng.give_up(1.0)
+        self.assertTrue(eng.is_blacklisted(10.0, -5.0, now=2.0))
+        self.assertEqual(eng.downed, 0)       # not counted as a knockdown
+        self.assertIsNone(eng.track_id)
+
+
+class PatrolTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = settings_with()
+        self.patrol = gs.PatrolController(self.settings)
+        self.cfg = self.settings["patrol"]
+
+    def test_off_by_default_and_toggles(self):
+        self.assertFalse(self.patrol.enabled)
+        self.assertEqual(self.patrol.update(0.0, 900, False), (0.0, 0.0, 0.0))
+        self.assertTrue(self.patrol.toggle(0.0))
+        x, y, z = self.patrol.update(0.1, 900, False)
+        self.assertAlmostEqual(y, self.cfg["speed_mps"])
+        self.assertEqual(z, 0.0)
+
+    def test_stops_while_engaging_a_card(self):
+        self.patrol.toggle(0.0)
+        self.assertEqual(self.patrol.update(0.1, 900, engaged=True), (0.0, 0.0, 0.0))
+        self.assertEqual(self.patrol.state, "holding (target)")
+
+    def test_holds_distance_to_the_wall(self):
+        self.patrol.toggle(0.0)
+        far_x = self.patrol.update(0.1, self.cfg["wall_distance_mm"] + 400, False)[0]
+        near_x = self.patrol.update(0.2, self.cfg["wall_distance_mm"] - 300, False)[0]
+        self.assertGreater(far_x, 0)        # too far -> approach
+        self.assertLess(near_x, 0)          # too close -> back away
+        self.assertLessEqual(abs(far_x), self.cfg["max_approach_mps"])
+        self.assertAlmostEqual(self.patrol.update(0.3, self.cfg["wall_distance_mm"], False)[0], 0.0)
+
+    def test_never_closer_than_one_metre(self):
+        self.patrol.toggle(0.0)
+        self.assertGreaterEqual(self.cfg["min_distance_mm"], 1000)
+        # Just inside the margin: creep backwards, keep patrolling sideways.
+        x, y, _ = self.patrol.update(0.1, self.cfg["min_distance_mm"] - 50, False)
+        self.assertLess(x, 0)
+        self.assertNotEqual(y, 0.0)
+        self.assertEqual(self.patrol.state, "keeping 1 m")
+        # Much too close: back off at full speed.
+        x, _, _ = self.patrol.update(0.2, self.cfg["min_distance_mm"] * 0.5, False)
+        self.assertAlmostEqual(x, -self.cfg["max_approach_mps"])
+        self.assertEqual(self.patrol.state, "backing off")
+
+    def test_patrol_never_commands_forward_inside_the_margin(self):
+        self.patrol.toggle(0.0)
+        for front in range(200, 1001, 100):
+            x = self.patrol.update(0.1, front, False)[0]
+            self.assertLessEqual(x, 0.0, f"drove forward at {front} mm")
+
+    def test_manual_forward_is_blocked_near_the_wall(self):
+        limit = self.cfg["min_distance_mm"]
+        # Too close: forward is cut, backing up and strafing still work.
+        (x, y, z), blocked = gs.limit_forward((0.5, 0.3, 90.0), limit - 200, limit)
+        self.assertEqual((x, y, z), (0.0, 0.3, 90.0))
+        self.assertTrue(blocked)
+        self.assertEqual(gs.limit_forward((-0.5, 0.0, 0.0), limit - 200, limit)[0][0], -0.5)
+        # Far enough away, or no ToF reading: nothing is changed.
+        self.assertEqual(gs.limit_forward((0.5, 0.0, 0.0), limit + 200, limit), ((0.5, 0.0, 0.0), False))
+        self.assertEqual(gs.limit_forward((0.5, 0.0, 0.0), None, limit), ((0.5, 0.0, 0.0), False))
+        self.assertEqual(gs.limit_forward((0.5, 0.0, 0.0), 0, limit), ((0.5, 0.0, 0.0), False))
+
+    def test_reverses_direction_at_the_end_of_a_leg(self):
+        self.patrol.toggle(0.0)
+        first = self.patrol.update(0.1, 900, False)[1]
+        later = self.patrol.update(self.cfg["leg_seconds"] + 0.2, 900, False)[1]
+        self.assertAlmostEqual(first, -later)
+
+    def test_missing_tof_still_patrols_without_approaching(self):
+        self.patrol.toggle(0.0)
+        x, y, _ = self.patrol.update(0.1, None, False)
+        self.assertEqual(x, 0.0)
+        self.assertNotEqual(y, 0.0)
+        self.assertIn("no ToF", self.patrol.state)
+
+
+class EndToEndKnockdownTests(unittest.TestCase):
+    """Full program on a synthetic clip: fire at a card, the card goes down,
+    and that spot is not shot again."""
+
+    def make_clip(self, path, aim_x, aim_y, size_px, frames_present, frames_gone, frames_again):
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 22, (W, H))
+        def card(img):
+            draw_shape(img, "rectangle", "green", (aim_x, aim_y), size_px, angle=90)
+        for _ in range(frames_present):
+            img = background(seed=1); card(img); writer.write(img)
+        for _ in range(frames_gone):
+            writer.write(background(seed=1))
+        for _ in range(frames_again):          # card lying there / another one in the same spot
+            img = background(seed=1); card(img); writer.write(img)
+        writer.release()
+
+    def test_stops_shooting_a_downed_card(self):
+        settings = settings_with()
+        aim = gs.AimController(settings)
+        detector = ColorShapeDetector(settings)
+        focal = detector.focal_length(W)
+        distance = 1.2
+        # Put the card exactly where the barrel points, so the (stationary, offline)
+        # gimbal locks on immediately.
+        comp = aim.pitch_compensation(distance)
+        aim_y = H / 2 + focal * math.tan(math.radians(comp))
+        size_px = focal * 0.07 / distance
+
+        tmp = tempfile.mkdtemp()
+        clip = os.path.join(tmp, "cards.mp4")
+        try:
+            self.make_clip(clip, W / 2, aim_y, size_px, 40, 60, 60)
+            args = types.SimpleNamespace(connection=None, source=clip, color="green", shape="rectangle",
+                                         size=0.07, auto_fire=True, patrol=False, headless=True,
+                                         max_frames=0, save=None)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                gs.run(args)
+            text = out.getvalue()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        before_down, _, after_down = text.partition("Target down")
+        self.assertTrue(after_down, f"card was never declared down:\n{text}")
+        self.assertIn("FIRE (auto)", before_down)
+        self.assertNotIn("FIRE", after_down, "kept shooting a card that was already down")
+        self.assertLessEqual(text.count("FIRE (auto)"), settings["firing"]["max_shots_per_target"])
+
+
 class UnitTests(unittest.TestCase):
     def test_fire_control_rules(self):
         s = settings_with(auto_fire=True, cooldown_s=0.5, max_shots_per_target=2)
@@ -297,6 +554,10 @@ class UnitTests(unittest.TestCase):
             ("firing", {"cooldown_s": 0}),
             ("controls", {"keyboard_backend": "joystick"}),
             ("controls", {"robot_mode": "sport"}),
+            ("patrol", {"speed_mps": 0}),
+            ("patrol", {"min_distance_mm": 5000}),
+            ("knockdown", {"fall_missing_frames": 0}),
+            ("knockdown", {"skip_after_max_shots": "sometimes"}),
         ]:
             with self.subTest(section=section, override=override):
                 config = load_config()
